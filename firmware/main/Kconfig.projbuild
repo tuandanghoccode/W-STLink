@@ -1,0 +1,1242 @@
+menu "CMSIS-DAP configuration"
+
+    menu "CMSIS-DAP Interface #1"
+
+        config ESP_DAP_1_TCP_PORT
+            int "TCP port number"
+            default 4441
+            help
+                Select the TCP port number for CMSIS-DAP interface 1.
+
+        config ESP_DAP_1_JTAG_SUPPORTED
+            bool "Target JTAG supported"
+            default y
+            help
+                Include support for JTAG.
+
+        config ESP_DAP_1_SWD_SUPPORTED
+            bool "Target SWD supported"
+            default y
+            help
+                Include support for SWD.
+
+        config ESP_DAP_1_JTAG_NTRST_SUPPORTED
+            bool "Target JTAG nTRST supported"
+            default y
+            depends on ESP_DAP_1_JTAG_SUPPORTED
+            help
+                Include support for driving the JTAG TRST signal.
+
+        config ESP_DAP_1_NRESET_SUPPORTED
+            bool "Target nRESET supported"
+            default y
+            help
+                Include support for driving the target nRESET signal.
+
+        choice ESP_DAP_1_DRIVE_STRENGTH
+            prompt "GPIO drive strength for SWD/JTAG/RESET output pins"
+            default ESP_DAP_1_DRIVE_STRENGTH_0
+            help
+                Drive strength for all SWD/JTAG output pins (SWCLK/TCK,
+                SWDIO/TMS, TDI, nTRST, nRESET). Weaker settings improve signal
+                integrity on short, low-capacitance connections. Stronger
+                settings may be needed to get clean edges on longer cables or
+                higher-capacitance loads, at the cost of more ringing/EMI on
+                short ones.
+
+            config ESP_DAP_1_DRIVE_STRENGTH_0
+                bool "Weakest"
+            config ESP_DAP_1_DRIVE_STRENGTH_1
+                bool "Weak"
+            config ESP_DAP_1_DRIVE_STRENGTH_2
+                bool "Medium"
+            config ESP_DAP_1_DRIVE_STRENGTH_3
+                bool "Strongest"
+        endchoice
+
+        config ESP_DAP_1_DRIVE_STRENGTH
+            int
+            default 0 if ESP_DAP_1_DRIVE_STRENGTH_0
+            default 1 if ESP_DAP_1_DRIVE_STRENGTH_1
+            default 2 if ESP_DAP_1_DRIVE_STRENGTH_2
+            default 3 if ESP_DAP_1_DRIVE_STRENGTH_3
+
+        config ESP_DAP_1_GPIO_SWCLK_TCK
+            int "GPIO number for SWCLK / TCK"
+            default 19
+            depends on ESP_DAP_1_JTAG_SUPPORTED || ESP_DAP_1_SWD_SUPPORTED
+
+        config ESP_DAP_1_GPIO_SWDIO_TMS
+            int "GPIO number for SWDIO / TMS"
+            default 20
+            depends on ESP_DAP_1_JTAG_SUPPORTED || ESP_DAP_1_SWD_SUPPORTED
+
+        config ESP_DAP_1_GPIO_TDI
+            int "GPIO number for TDI"
+            default 22
+            depends on ESP_DAP_1_JTAG_SUPPORTED
+
+        config ESP_DAP_1_GPIO_TDO
+            int "GPIO number for TDO"
+            default 23
+            depends on ESP_DAP_1_JTAG_SUPPORTED
+
+        config ESP_DAP_1_GPIO_NTRST
+            int "GPIO number for nTRST"
+            default 21
+            depends on ESP_DAP_1_JTAG_SUPPORTED && ESP_DAP_1_JTAG_NTRST_SUPPORTED
+
+        config ESP_DAP_1_GPIO_NRESET
+            int "GPIO number for nRESET"
+            default 18
+            depends on ESP_DAP_1_NRESET_SUPPORTED
+
+        config ESP_DAP_1_GPIO_LED
+            int "GPIO number for LED"
+            default 15
+            depends on ESP_DAP_1_LED_STANDARD || ESP_DAP_1_LED_RGB
+
+        choice ESP_DAP_1_LED_SUPPORTED
+            prompt "LED supported"
+            default ESP_DAP_1_LED_NONE
+            help
+                Include support for turning on an LED when connected to the target.
+            config ESP_DAP_1_LED_NONE
+                bool "None"
+            config ESP_DAP_1_LED_STANDARD
+                bool "Standard LED"
+            config ESP_DAP_1_LED_RGB
+                bool "WS2812-compatible RGB LED"
+        endchoice
+
+        config ESP_DAP_1_LED_RGB_INTENSITY_R
+            int "RGB LED red intensity"
+            range 0 255
+            default 32
+            depends on ESP_DAP_1_LED_RGB
+            help
+                Intensity of the red component of the LED when turned on.
+
+        config ESP_DAP_1_LED_RGB_INTENSITY_G
+            int "RGB LED green intensity"
+            range 0 255
+            default 32
+            depends on ESP_DAP_1_LED_RGB
+            help
+                Intensity of the green component of the LED when turned on.
+
+        config ESP_DAP_1_LED_RGB_INTENSITY_B
+            int "RGB LED blue intensity"
+            range 0 255
+            default 32
+            depends on ESP_DAP_1_LED_RGB
+            help
+                Intensity of the blue component of the LED when turned on.
+
+        choice ESP_DAP_1_LED_POLARITY
+            prompt "LED polarity"
+            default ESP_DAP_1_LED_ACTIVE_LOW
+            depends on ESP_DAP_1_LED_STANDARD
+            help
+                The LED is either active high or active low.
+
+            config ESP_DAP_1_LED_ACTIVE_HIGH
+                bool "LED is active high"
+            config ESP_DAP_1_LED_ACTIVE_LOW
+                bool "LED is active low"
+        endchoice
+
+
+    endmenu
+
+    menu "CMSIS-DAP Interface #2"
+
+        config ESP_DAP_2_ENABLED
+            bool "Enable a second CMSIS-DAP TCP interface"
+            default n
+            help
+                Start a second, independent CMSIS-DAP TCP server with its
+                own GPIO pins and TCP port. Useful when a single ESP32
+                needs to service two separate JTAG/SWD chains. Shares TCP
+                keep-alive settings with the first interface (see the
+                shared settings near the end of this menu).
+
+        if ESP_DAP_2_ENABLED
+
+            config ESP_DAP_2_TCP_PORT
+                int "TCP port number"
+                default 4443
+                help
+                    Select the TCP port number for the second CMSIS-DAP interface.
+
+            config ESP_DAP_2_JTAG_SUPPORTED
+                bool "Target JTAG supported"
+                default y
+                help
+                    Include support for JTAG.
+
+            config ESP_DAP_2_SWD_SUPPORTED
+                bool "Target SWD supported"
+                default y
+                help
+                    Include support for SWD.
+
+            config ESP_DAP_2_JTAG_NTRST_SUPPORTED
+                bool "Target JTAG nTRST supported"
+                default y
+                depends on ESP_DAP_2_JTAG_SUPPORTED
+                help
+                    Include support for driving the JTAG TRST signal.
+
+            config ESP_DAP_2_NRESET_SUPPORTED
+                bool "Target nRESET supported"
+                default y
+                help
+                    Include support for driving the target nRESET signal.
+
+            choice ESP_DAP_2_DRIVE_STRENGTH
+                prompt "GPIO drive strength for SWD/JTAG/RESET output pins"
+                default ESP_DAP_2_DRIVE_STRENGTH_0
+                help
+                    Drive strength for all SWD/JTAG output pins on the
+                    second interface (SWCLK/TCK, SWDIO/TMS, TDI, nTRST,
+                    nRESET). See interface 1's equivalent setting for
+                    details on the tradeoffs.
+
+                config ESP_DAP_2_DRIVE_STRENGTH_0
+                    bool "Weakest"
+                config ESP_DAP_2_DRIVE_STRENGTH_1
+                    bool "Weak"
+                config ESP_DAP_2_DRIVE_STRENGTH_2
+                    bool "Medium"
+                config ESP_DAP_2_DRIVE_STRENGTH_3
+                    bool "Strongest"
+            endchoice
+
+            config ESP_DAP_2_DRIVE_STRENGTH
+                int
+                default 0 if ESP_DAP_2_DRIVE_STRENGTH_0
+                default 1 if ESP_DAP_2_DRIVE_STRENGTH_1
+                default 2 if ESP_DAP_2_DRIVE_STRENGTH_2
+                default 3 if ESP_DAP_2_DRIVE_STRENGTH_3
+
+            config ESP_DAP_2_GPIO_SWCLK_TCK
+                int "GPIO number for SWCLK / TCK"
+                default -1
+                depends on ESP_DAP_2_JTAG_SUPPORTED || ESP_DAP_2_SWD_SUPPORTED
+
+            config ESP_DAP_2_GPIO_SWDIO_TMS
+                int "GPIO number for SWDIO / TMS"
+                default -1
+                depends on ESP_DAP_2_JTAG_SUPPORTED || ESP_DAP_2_SWD_SUPPORTED
+
+            config ESP_DAP_2_GPIO_TDI
+                int "GPIO number for TDI"
+                default -1
+                depends on ESP_DAP_2_JTAG_SUPPORTED
+
+            config ESP_DAP_2_GPIO_TDO
+                int "GPIO number for TDO"
+                default -1
+                depends on ESP_DAP_2_JTAG_SUPPORTED
+
+            config ESP_DAP_2_GPIO_NTRST
+                int "GPIO number for nTRST"
+                default -1
+                depends on ESP_DAP_2_JTAG_SUPPORTED && ESP_DAP_2_JTAG_NTRST_SUPPORTED
+
+            config ESP_DAP_2_GPIO_NRESET
+                int "GPIO number for nRESET"
+                default -1
+                depends on ESP_DAP_2_NRESET_SUPPORTED
+
+            config ESP_DAP_2_GPIO_LED
+                int "GPIO number for LED"
+                default -1
+                depends on ESP_DAP_2_LED_STANDARD || ESP_DAP_2_LED_RGB
+
+            choice ESP_DAP_2_LED_SUPPORTED
+                prompt "LED supported"
+                default ESP_DAP_2_LED_NONE
+                help
+                    Include support for turning on an LED when connected to
+                    the target, on the second interface.
+                config ESP_DAP_2_LED_NONE
+                    bool "None"
+                config ESP_DAP_2_LED_STANDARD
+                    bool "Standard LED"
+                config ESP_DAP_2_LED_RGB
+                    bool "WS2812-compatible RGB LED"
+            endchoice
+
+            config ESP_DAP_2_LED_RGB_INTENSITY_R
+                int "RGB LED red intensity"
+                range 0 255
+                default 32
+                depends on ESP_DAP_2_LED_RGB
+                help
+                    Intensity of the red component of the LED when turned on.
+
+            config ESP_DAP_2_LED_RGB_INTENSITY_G
+                int "RGB LED green intensity"
+                range 0 255
+                default 32
+                depends on ESP_DAP_2_LED_RGB
+                help
+                    Intensity of the green component of the LED when turned on.
+
+            config ESP_DAP_2_LED_RGB_INTENSITY_B
+                int "RGB LED blue intensity"
+                range 0 255
+                default 32
+                depends on ESP_DAP_2_LED_RGB
+                help
+                    Intensity of the blue component of the LED when turned on.
+
+            choice ESP_DAP_2_LED_POLARITY
+                prompt "LED polarity"
+                default ESP_DAP_2_LED_ACTIVE_LOW
+                depends on ESP_DAP_2_LED_STANDARD
+                help
+                    The LED is either active high or active low.
+
+                config ESP_DAP_2_LED_ACTIVE_HIGH
+                    bool "LED is active high"
+                config ESP_DAP_2_LED_ACTIVE_LOW
+                    bool "LED is active low"
+            endchoice
+
+        endif
+
+    endmenu
+
+    menu "CMSIS-DAP Interface #3"
+
+        config ESP_DAP_3_ENABLED
+            bool "Enable a third CMSIS-DAP TCP interface"
+            default n
+            help
+                Start a third, independent CMSIS-DAP TCP server with its
+                own GPIO pins and TCP port. Useful when a single ESP32
+                needs to service three separate JTAG/SWD chains. Shares
+                TCP keep-alive settings with the first interface (see
+                the shared settings near the end of this menu).
+
+        if ESP_DAP_3_ENABLED
+
+            config ESP_DAP_3_TCP_PORT
+                int "TCP port number"
+                default 4445
+                help
+                    Select the TCP port number for the third CMSIS-DAP interface.
+
+            config ESP_DAP_3_JTAG_SUPPORTED
+                bool "Target JTAG supported"
+                default y
+                help
+                    Include support for JTAG.
+
+            config ESP_DAP_3_SWD_SUPPORTED
+                bool "Target SWD supported"
+                default y
+                help
+                    Include support for SWD.
+
+            config ESP_DAP_3_JTAG_NTRST_SUPPORTED
+                bool "Target JTAG nTRST supported"
+                default y
+                depends on ESP_DAP_3_JTAG_SUPPORTED
+                help
+                    Include support for driving the JTAG TRST signal.
+
+            config ESP_DAP_3_NRESET_SUPPORTED
+                bool "Target nRESET supported"
+                default y
+                help
+                    Include support for driving the target nRESET signal.
+
+            choice ESP_DAP_3_DRIVE_STRENGTH
+                prompt "GPIO drive strength for SWD/JTAG/RESET output pins"
+                default ESP_DAP_3_DRIVE_STRENGTH_0
+                help
+                    Drive strength for all SWD/JTAG output pins on the
+                    third interface (SWCLK/TCK, SWDIO/TMS, TDI, nTRST,
+                    nRESET). See interface 1's equivalent setting for
+                    details on the tradeoffs.
+
+                config ESP_DAP_3_DRIVE_STRENGTH_0
+                    bool "Weakest"
+                config ESP_DAP_3_DRIVE_STRENGTH_1
+                    bool "Weak"
+                config ESP_DAP_3_DRIVE_STRENGTH_2
+                    bool "Medium"
+                config ESP_DAP_3_DRIVE_STRENGTH_3
+                    bool "Strongest"
+            endchoice
+
+            config ESP_DAP_3_DRIVE_STRENGTH
+                int
+                default 0 if ESP_DAP_3_DRIVE_STRENGTH_0
+                default 1 if ESP_DAP_3_DRIVE_STRENGTH_1
+                default 2 if ESP_DAP_3_DRIVE_STRENGTH_2
+                default 3 if ESP_DAP_3_DRIVE_STRENGTH_3
+
+            config ESP_DAP_3_GPIO_SWCLK_TCK
+                int "GPIO number for SWCLK / TCK"
+                default -1
+                depends on ESP_DAP_3_JTAG_SUPPORTED || ESP_DAP_3_SWD_SUPPORTED
+
+            config ESP_DAP_3_GPIO_SWDIO_TMS
+                int "GPIO number for SWDIO / TMS"
+                default -1
+                depends on ESP_DAP_3_JTAG_SUPPORTED || ESP_DAP_3_SWD_SUPPORTED
+
+            config ESP_DAP_3_GPIO_TDI
+                int "GPIO number for TDI"
+                default -1
+                depends on ESP_DAP_3_JTAG_SUPPORTED
+
+            config ESP_DAP_3_GPIO_TDO
+                int "GPIO number for TDO"
+                default -1
+                depends on ESP_DAP_3_JTAG_SUPPORTED
+
+            config ESP_DAP_3_GPIO_NTRST
+                int "GPIO number for nTRST"
+                default -1
+                depends on ESP_DAP_3_JTAG_SUPPORTED && ESP_DAP_3_JTAG_NTRST_SUPPORTED
+
+            config ESP_DAP_3_GPIO_NRESET
+                int "GPIO number for nRESET"
+                default -1
+                depends on ESP_DAP_3_NRESET_SUPPORTED
+
+            config ESP_DAP_3_GPIO_LED
+                int "GPIO number for LED"
+                default -1
+                depends on ESP_DAP_3_LED_STANDARD || ESP_DAP_3_LED_RGB
+
+            choice ESP_DAP_3_LED_SUPPORTED
+                prompt "LED supported"
+                default ESP_DAP_3_LED_NONE
+                help
+                    Include support for turning on an LED when connected to
+                    the target, on the third interface.
+                config ESP_DAP_3_LED_NONE
+                    bool "None"
+                config ESP_DAP_3_LED_STANDARD
+                    bool "Standard LED"
+                config ESP_DAP_3_LED_RGB
+                    bool "WS2812-compatible RGB LED"
+            endchoice
+
+            config ESP_DAP_3_LED_RGB_INTENSITY_R
+                int "RGB LED red intensity"
+                range 0 255
+                default 32
+                depends on ESP_DAP_3_LED_RGB
+                help
+                    Intensity of the red component of the LED when turned on.
+
+            config ESP_DAP_3_LED_RGB_INTENSITY_G
+                int "RGB LED green intensity"
+                range 0 255
+                default 32
+                depends on ESP_DAP_3_LED_RGB
+                help
+                    Intensity of the green component of the LED when turned on.
+
+            config ESP_DAP_3_LED_RGB_INTENSITY_B
+                int "RGB LED blue intensity"
+                range 0 255
+                default 32
+                depends on ESP_DAP_3_LED_RGB
+                help
+                    Intensity of the blue component of the LED when turned on.
+
+            choice ESP_DAP_3_LED_POLARITY
+                prompt "LED polarity"
+                default ESP_DAP_3_LED_ACTIVE_LOW
+                depends on ESP_DAP_3_LED_STANDARD
+                help
+                    The LED is either active high or active low.
+
+                config ESP_DAP_3_LED_ACTIVE_HIGH
+                    bool "LED is active high"
+                config ESP_DAP_3_LED_ACTIVE_LOW
+                    bool "LED is active low"
+            endchoice
+
+        endif
+
+    endmenu
+
+    menu "UART to TCP/IP bridge #1"
+
+        config ESP_UART_BRIDGE_1_ENABLED
+            bool "Enable the UART to TCP/IP bridge"
+            default n
+            help
+                Start a TCP/IP server that connects to a UART on the board. This
+                can be used to bridge a target board's console over TCP/IP.
+
+        config ESP_UART_BRIDGE_1_TCP_PORT
+            int "TCP port number"
+            default 4442
+            depends on ESP_UART_BRIDGE_1_ENABLED
+            help
+                Select the TCP port number for the UART bridge.
+
+        config ESP_UART_BRIDGE_1_USE_KEEPALIVE
+            bool "Enable TCP keep-alive packets and disconnect on timeout"
+            default y
+            depends on ESP_UART_BRIDGE_1_ENABLED
+            help
+                To detect dead clients, use TCP keepalives and drop the
+                connection if a timeout occurs.
+
+        config ESP_UART_BRIDGE_1_KEEPALIVE_TIMEOUT
+            int "TCP keep-alive timeout in seconds"
+            default 10
+            depends on ESP_UART_BRIDGE_1_USE_KEEPALIVE
+            help
+                Drop the connection if a client does not respond for this
+                number of seconds.
+
+        config ESP_UART_BRIDGE_1_UART_NUM
+            int "UART number"
+            default 1
+            depends on ESP_UART_BRIDGE_1_ENABLED
+            help
+                Select the UART number to use.
+
+        config ESP_UART_BRIDGE_1_REMAP_PINS
+            bool "Select the GPIO numbers used for UART TX and RX signals"
+            default n
+            depends on ESP_UART_BRIDGE_1_ENABLED
+            help
+                Choose the specific GPIO numbers to use for UART TX and RX.
+
+        config ESP_UART_BRIDGE_1_TXD_PIN
+            int "GPIO number for UART TX"
+            default 2
+            depends on ESP_UART_BRIDGE_1_REMAP_PINS
+            help
+                Choose the GPIO number to use for UART TX
+
+        config ESP_UART_BRIDGE_1_RXD_PIN
+            int "GPIO number for UART RX"
+            default 1
+            depends on ESP_UART_BRIDGE_1_REMAP_PINS
+            help
+                Choose the GPIO number to use for UART RX
+
+        config ESP_UART_BRIDGE_1_BAUD_RATE
+            int "UART baud rate"
+            default 115200
+            depends on ESP_UART_BRIDGE_1_ENABLED
+            help
+                Select the baud rate for the UART.
+
+        config ESP_UART_BRIDGE_1_DATA_BITS
+            int "UART data bits"
+            default 8
+            depends on ESP_UART_BRIDGE_1_ENABLED
+            help
+                Select the number of data bits (7 or 8) for the UART.
+
+        choice ESP_UART_BRIDGE_1_PARITY
+            prompt "UART parity"
+            default ESP_UART_BRIDGE_1_PARITY_NONE
+            depends on ESP_UART_BRIDGE_1_ENABLED
+            help
+                Select the parity for the UART.
+
+            config ESP_UART_BRIDGE_1_PARITY_NONE
+                bool "None"
+            config ESP_UART_BRIDGE_1_PARITY_EVEN
+                bool "Even"
+            config ESP_UART_BRIDGE_1_PARITY_ODD
+                bool "Odd"
+        endchoice
+
+        config ESP_UART_BRIDGE_1_STOP_BITS
+            int "UART stop bits"
+            default 1
+            depends on ESP_UART_BRIDGE_1_ENABLED
+            help
+                Select the number of stop bits (1 or 2) for the UART.
+
+    endmenu
+
+    menu "UART to TCP/IP bridge #2"
+        depends on SOC_UART_HP_NUM >= 2
+
+        config ESP_UART_BRIDGE_2_ENABLED
+            bool "Enable a second UART to TCP/IP bridge"
+            default n
+            help
+                Start a second, independent UART to TCP/IP bridge on a
+                different UART peripheral. Only available on chips with at
+                least 2 usable UART controllers (this one and UART bridge #1
+                each need their own).
+
+        if ESP_UART_BRIDGE_2_ENABLED
+
+            config ESP_UART_BRIDGE_2_TCP_PORT
+                int "TCP port number"
+                default 4444
+                help
+                    Select the TCP port number for the second UART bridge.
+
+            config ESP_UART_BRIDGE_2_USE_KEEPALIVE
+                bool "Enable TCP keep-alive packets and disconnect on timeout"
+                default y
+                help
+                    To detect dead clients, use TCP keepalives and drop the
+                    connection if a timeout occurs.
+
+            config ESP_UART_BRIDGE_2_KEEPALIVE_TIMEOUT
+                int "TCP keep-alive timeout in seconds"
+                default 10
+                depends on ESP_UART_BRIDGE_2_USE_KEEPALIVE
+                help
+                    Drop the connection if a client does not respond for this
+                    number of seconds.
+
+            config ESP_UART_BRIDGE_2_UART_NUM
+                int "UART number"
+                default 2 if SOC_UART_HP_NUM > 2
+                default 0
+                help
+                    Select the UART number to use. Defaults to a UART not
+                    used by UART bridge #1 (which defaults to UART 1).
+
+            config ESP_UART_BRIDGE_2_REMAP_PINS
+                bool "Select the GPIO numbers used for UART TX and RX signals"
+                default n
+                help
+                    Choose the specific GPIO numbers to use for UART TX and RX.
+
+            config ESP_UART_BRIDGE_2_TXD_PIN
+                int "GPIO number for UART TX"
+                default -1
+                depends on ESP_UART_BRIDGE_2_REMAP_PINS
+                help
+                    Choose the GPIO number to use for UART TX
+
+            config ESP_UART_BRIDGE_2_RXD_PIN
+                int "GPIO number for UART RX"
+                default -1
+                depends on ESP_UART_BRIDGE_2_REMAP_PINS
+                help
+                    Choose the GPIO number to use for UART RX
+
+            config ESP_UART_BRIDGE_2_BAUD_RATE
+                int "UART baud rate"
+                default 115200
+                help
+                    Select the baud rate for the UART.
+
+            config ESP_UART_BRIDGE_2_DATA_BITS
+                int "UART data bits"
+                default 8
+                help
+                    Select the number of data bits (7 or 8) for the UART.
+
+            choice ESP_UART_BRIDGE_2_PARITY
+                prompt "UART parity"
+                default ESP_UART_BRIDGE_2_PARITY_NONE
+                help
+                    Select the parity for the UART.
+
+                config ESP_UART_BRIDGE_2_PARITY_NONE
+                    bool "None"
+                config ESP_UART_BRIDGE_2_PARITY_EVEN
+                    bool "Even"
+                config ESP_UART_BRIDGE_2_PARITY_ODD
+                    bool "Odd"
+            endchoice
+
+            config ESP_UART_BRIDGE_2_STOP_BITS
+                int "UART stop bits"
+                default 1
+                help
+                    Select the number of stop bits (1 or 2) for the UART.
+
+        endif
+
+    endmenu
+
+    menu "UART to TCP/IP bridge #3"
+        depends on SOC_UART_HP_NUM >= 3
+
+        config ESP_UART_BRIDGE_3_ENABLED
+            bool "Enable a third UART to TCP/IP bridge"
+            default n
+            help
+                Start a third, independent UART to TCP/IP bridge on a
+                different UART peripheral. Only available on chips with at
+                least 3 usable UART controllers (this one and UART bridges
+                #1 and #2 each need their own).
+
+        if ESP_UART_BRIDGE_3_ENABLED
+
+            config ESP_UART_BRIDGE_3_TCP_PORT
+                int "TCP port number"
+                default 4446
+                help
+                    Select the TCP port number for the third UART bridge.
+
+            config ESP_UART_BRIDGE_3_USE_KEEPALIVE
+                bool "Enable TCP keep-alive packets and disconnect on timeout"
+                default y
+                help
+                    To detect dead clients, use TCP keepalives and drop the
+                    connection if a timeout occurs.
+
+            config ESP_UART_BRIDGE_3_KEEPALIVE_TIMEOUT
+                int "TCP keep-alive timeout in seconds"
+                default 10
+                depends on ESP_UART_BRIDGE_3_USE_KEEPALIVE
+                help
+                    Drop the connection if a client does not respond for this
+                    number of seconds.
+
+            config ESP_UART_BRIDGE_3_UART_NUM
+                int "UART number"
+                default 3 if SOC_UART_HP_NUM > 3
+                default 0
+                help
+                    Select the UART number to use. Defaults to a UART not
+                    used by UART bridges #1 or #2 (which default to UART
+                    1 and UART 2 respectively, when available).
+
+            config ESP_UART_BRIDGE_3_REMAP_PINS
+                bool "Select the GPIO numbers used for UART TX and RX signals"
+                default n
+                help
+                    Choose the specific GPIO numbers to use for UART TX and RX.
+
+            config ESP_UART_BRIDGE_3_TXD_PIN
+                int "GPIO number for UART TX"
+                default -1
+                depends on ESP_UART_BRIDGE_3_REMAP_PINS
+                help
+                    Choose the GPIO number to use for UART TX
+
+            config ESP_UART_BRIDGE_3_RXD_PIN
+                int "GPIO number for UART RX"
+                default -1
+                depends on ESP_UART_BRIDGE_3_REMAP_PINS
+                help
+                    Choose the GPIO number to use for UART RX
+
+            config ESP_UART_BRIDGE_3_BAUD_RATE
+                int "UART baud rate"
+                default 115200
+                help
+                    Select the baud rate for the UART.
+
+            config ESP_UART_BRIDGE_3_DATA_BITS
+                int "UART data bits"
+                default 8
+                help
+                    Select the number of data bits (7 or 8) for the UART.
+
+            choice ESP_UART_BRIDGE_3_PARITY
+                prompt "UART parity"
+                default ESP_UART_BRIDGE_3_PARITY_NONE
+                help
+                    Select the parity for the UART.
+
+                config ESP_UART_BRIDGE_3_PARITY_NONE
+                    bool "None"
+                config ESP_UART_BRIDGE_3_PARITY_EVEN
+                    bool "Even"
+                config ESP_UART_BRIDGE_3_PARITY_ODD
+                    bool "Odd"
+            endchoice
+
+            config ESP_UART_BRIDGE_3_STOP_BITS
+                int "UART stop bits"
+                default 1
+                help
+                    Select the number of stop bits (1 or 2) for the UART.
+
+        endif
+
+    endmenu
+
+    menu "Console commands"
+
+        config ESP_DAP_SERIAL_CONSOLE_ENABLED
+            bool "Enable console commands over serial console (UART/USB)"
+            default y
+            help
+                Registers commands (wifi, uart, adc, status, ...) on the
+                serial console selected under Component config > ESP
+                System Settings > Channel for console output.
+
+        config ESP_DAP_SOCKET_CONSOLE_ENABLED
+            bool "Enable console commands over TCP socket"
+            default y
+            help
+                Runs the same console commands available on the serial
+                console (wifi, uart, adc, status, ...) over a TCP socket
+                too. Supports multiple simultaneous connections. Works
+                independently of ESP_DAP_MANAGE_WIFI -- useful when a host
+                project brings up its own networking but still wants this
+                console.
+
+        menu "Console commands over TCP"
+            depends on ESP_DAP_SOCKET_CONSOLE_ENABLED
+
+            config ESP_DAP_SOCKET_CONSOLE_TCP_PORT
+                int "TCP port number"
+                default 4440
+                depends on ESP_DAP_SOCKET_CONSOLE_ENABLED
+                help
+                    Select the TCP port number for the socket console.
+
+            config ESP_DAP_SOCKET_CONSOLE_USE_KEEPALIVE
+                bool "Enable TCP keep-alive packets and disconnect on timeout"
+                default y
+                depends on ESP_DAP_SOCKET_CONSOLE_ENABLED
+                help
+                    To detect dead clients, use TCP keepalives and drop the
+                    connection if a timeout occurs.
+
+            config ESP_DAP_SOCKET_CONSOLE_KEEPALIVE_TIMEOUT
+                int "TCP keep-alive timeout in seconds"
+                default 10
+                depends on ESP_DAP_SOCKET_CONSOLE_ENABLED && ESP_DAP_SOCKET_CONSOLE_USE_KEEPALIVE
+                help
+                    Drop the connection if a client does not respond for this
+                    number of seconds.
+
+        endmenu
+
+    endmenu
+
+    menu "Manual GPIO control"
+
+        config ESP_GPIO_CONTROL_ENABLED
+            bool "Enable lightweight GPIO control commands"
+            default n
+            depends on ESP_DAP_SERIAL_CONSOLE_ENABLED || ESP_DAP_SOCKET_CONSOLE_ENABLED
+            depends on IDF_TARGET_ESP32C3 || IDF_TARGET_ESP32S3 || IDF_TARGET_ESP32C6
+            help
+                Adds gpio list/config/read/write/save/clear to the existing consoles.
+                Supports digital inputs with floating/pull-up/pull-down and
+                push-pull or open-drain outputs. Config and write change only
+                live state; use save to store the current configuration and
+                output level as startup defaults in NVS. Clear removes saved
+                settings and leaves a floating input. No additional task is created.
+                Disabled by default. Enable this feature and configure the
+                allow-list below to control GPIOs appropriate for your board.
+
+        config ESP_GPIO_CONTROL_ALLOWED_PINS
+            string "GPIO control allow-list (comma-separated pin numbers)"
+            default ""
+            depends on ESP_GPIO_CONTROL_ENABLED
+            help
+                Explicitly list unused, exposed board GPIOs, for example 3,11.
+                An empty list allows no pins. ESP-IDF reserved pins, configured
+                DAP/LED/UART/console pins and native USB/chip-debug JTAG pins
+                are rejected even if listed here. When ADC streaming is enabled,
+                its selected GPIO and any GPIO still held by an existing ADC
+                connection are excluded; other ADC1-capable pins remain usable.
+                Exclude board-specific peripherals, strapping pins and any pins
+                used by the host application yourself.
+
+    endmenu
+
+    menu "ADC streaming"
+
+        config ESP_ADC_STREAM_ENABLED
+            bool "Enable ADC streaming over TCP"
+            default n
+            help
+                Streams ADC1 measurements (continuous/DMA mode) over TCP.
+                ADC2 is avoided since WiFi relies on it. Sampling starts on
+                client connect, stops on disconnect.
+
+        config ESP_ADC_STREAM_TCP_PORT
+            int "TCP port number"
+            default 4451
+            depends on ESP_ADC_STREAM_ENABLED
+            help
+                Select the TCP port number for the ADC streaming server.
+
+        config ESP_ADC_STREAM_USE_KEEPALIVE
+            bool "Enable TCP keep-alive packets and disconnect on timeout"
+            default y
+            depends on ESP_ADC_STREAM_ENABLED
+            help
+                To detect dead clients, use TCP keepalives and drop the
+                connection (stopping ADC sampling) if a timeout occurs.
+
+        config ESP_ADC_STREAM_KEEPALIVE_TIMEOUT
+            int "TCP keep-alive timeout in seconds"
+            default 10
+            depends on ESP_ADC_STREAM_ENABLED && ESP_ADC_STREAM_USE_KEEPALIVE
+            help
+                Drop the connection if a client does not respond for this
+                number of seconds.
+
+        config ESP_ADC_STREAM_GPIO
+            int "GPIO number for ADC1 input channel"
+            default 0
+            depends on ESP_ADC_STREAM_ENABLED
+            help
+                GPIO number to sample. Must be a valid ADC1 channel pin for
+                the target chip (board-specific sdkconfig fragments should
+                override this default). ADC2 is intentionally not
+                supported here since it conflicts with the WiFi driver.
+
+        config ESP_ADC_STREAM_SAMPLE_RATE_HZ
+            int "Output sample rate in Hz (after averaging)"
+            default 1000
+            range 1 83333
+            depends on ESP_ADC_STREAM_ENABLED
+            help
+                Rate measurements are sent at, after averaging. Raw ADC
+                rate = this x averaging count, must stay within ~611 Hz -
+                83.3 kHz; refused at connect time if not.
+
+        choice ESP_ADC_STREAM_AVERAGING_COUNT
+            prompt "Number of raw samples averaged per output sample"
+            default ESP_ADC_STREAM_AVERAGING_COUNT_16
+            depends on ESP_ADC_STREAM_ENABLED
+            help
+                Accumulated (not divided) and scaled to a 16-bit output via
+                a shift, so oversampled precision isn't rounded away. Every
+                4x buys ~1 extra bit, up to the 16-bit ceiling (16 = full
+                4 extra bits over native 12-bit; more reduces noise only).
+
+            config ESP_ADC_STREAM_AVERAGING_COUNT_1
+                bool "1 (no averaging)"
+            config ESP_ADC_STREAM_AVERAGING_COUNT_2
+                bool "2"
+            config ESP_ADC_STREAM_AVERAGING_COUNT_4
+                bool "4"
+            config ESP_ADC_STREAM_AVERAGING_COUNT_8
+                bool "8"
+            config ESP_ADC_STREAM_AVERAGING_COUNT_16
+                bool "16"
+            config ESP_ADC_STREAM_AVERAGING_COUNT_32
+                bool "32"
+            config ESP_ADC_STREAM_AVERAGING_COUNT_64
+                bool "64"
+            config ESP_ADC_STREAM_AVERAGING_COUNT_128
+                bool "128"
+            config ESP_ADC_STREAM_AVERAGING_COUNT_256
+                bool "256"
+            config ESP_ADC_STREAM_AVERAGING_COUNT_512
+                bool "512"
+            config ESP_ADC_STREAM_AVERAGING_COUNT_1024
+                bool "1024"
+        endchoice
+
+        config ESP_ADC_STREAM_AVERAGING_COUNT
+            int
+            default 1 if ESP_ADC_STREAM_AVERAGING_COUNT_1
+            default 2 if ESP_ADC_STREAM_AVERAGING_COUNT_2
+            default 4 if ESP_ADC_STREAM_AVERAGING_COUNT_4
+            default 8 if ESP_ADC_STREAM_AVERAGING_COUNT_8
+            default 16 if ESP_ADC_STREAM_AVERAGING_COUNT_16
+            default 32 if ESP_ADC_STREAM_AVERAGING_COUNT_32
+            default 64 if ESP_ADC_STREAM_AVERAGING_COUNT_64
+            default 128 if ESP_ADC_STREAM_AVERAGING_COUNT_128
+            default 256 if ESP_ADC_STREAM_AVERAGING_COUNT_256
+            default 512 if ESP_ADC_STREAM_AVERAGING_COUNT_512
+            default 1024 if ESP_ADC_STREAM_AVERAGING_COUNT_1024
+
+        choice ESP_ADC_STREAM_FORMAT
+            prompt "Output format"
+            default ESP_ADC_STREAM_FORMAT_TEXT
+            depends on ESP_ADC_STREAM_ENABLED
+            help
+                Wire format for streamed measurements, in millivolts.
+
+            config ESP_ADC_STREAM_FORMAT_TEXT
+                bool "Text (integer mV, newline-terminated)"
+            config ESP_ADC_STREAM_FORMAT_BINARY16
+                bool "Binary (16-bit little-endian signed mV)"
+        endchoice
+
+        config ESP_ADC_STREAM_CORRECTION_CURVE_X1000000
+            int "Correction curvature, x1,000,000 (quadratic; 0 disables)"
+            default 0
+            depends on ESP_ADC_STREAM_ENABLED
+            help
+                Fixes residual nonlinearity beyond the eFuse calibration.
+                Applied before gain/offset: curved_mV = calibrated_mV +
+                curve_x1000000 * calibrated_mV^2 / 1,000,000. Fit a
+                parabola to several (measured, reference) points to derive
+                this. 0 disables it.
+
+        config ESP_ADC_STREAM_CORRECTION_GAIN_X1000
+            int "Correction gain, x1000 (1000 = 1.000, no gain correction)"
+            default 1000
+            depends on ESP_ADC_STREAM_ENABLED
+            help
+                Linear gain trim applied after the curvature correction:
+                corrected_mV = curved_mV * gain_x1000 / 1000 + offset_mV.
+
+        config ESP_ADC_STREAM_CORRECTION_OFFSET_MV
+            int "Correction offset, in mV"
+            default 0
+            depends on ESP_ADC_STREAM_ENABLED
+            help
+                Additive offset applied after the gain correction above.
+                May be negative.
+
+    endmenu
+
+    menu "WiFi configuration"
+
+        config ESP_DAP_MANAGE_WIFI
+            bool "Enable WiFi configuration and connection management"
+            default y
+            help
+                Initializes WiFi in Station or SoftAP mode. Station mode
+                connects to a configured AP and manages reconnection.
+                Disable if a host project (when
+                this is consumed as a component) manages WiFi/networking
+                itself, or the target board has no WiFi radio.
+
+        if ESP_DAP_MANAGE_WIFI
+
+        choice ESP_DAP_WIFI_MODE
+            prompt "Default WiFi operating mode"
+            default ESP_DAP_WIFI_MODE_STA
+            help
+                Station mode connects to an existing wireless network.
+                SoftAP mode creates a local network for direct connections
+                from a computer without requiring an external router.
+                The default can be overridden at runtime via the serial
+                wifi_mode command; only one mode is active at a time.
+
+            config ESP_DAP_WIFI_MODE_STA
+                bool "Station - connect to an existing WiFi network"
+
+            config ESP_DAP_WIFI_MODE_AP
+                bool "SoftAP - create a WiFi network"
+        endchoice
+
+        # Keep both sets of defaults compiled in so either mode can be
+        # selected via the serial console without reflashing.
+        config ESP_WIFI_SSID
+            string "WiFi SSID"
+            default "myssid"
+            help
+                SSID (network name) to connect to.
+
+        config ESP_WIFI_PASSWORD
+            string "WiFi Password"
+            default "mypassword"
+            help
+                WiFi password (WPA or WPA2) to use.
+
+        choice ESP_WIFI_SAE_MODE
+            prompt "WPA3 SAE mode selection"
+            default ESP_STATION_EXAMPLE_WPA3_SAE_PWE_BOTH
+            help
+                Select mode for SAE as Hunt and Peck, H2E or both.
+            config ESP_STATION_EXAMPLE_WPA3_SAE_PWE_HUNT_AND_PECK
+                bool "HUNT AND PECK"
+            config ESP_STATION_EXAMPLE_WPA3_SAE_PWE_HASH_TO_ELEMENT
+                bool "H2E"
+                depends on ESP_WIFI_ENABLE_SAE_H2E
+            config ESP_STATION_EXAMPLE_WPA3_SAE_PWE_BOTH
+                bool "BOTH"
+                depends on ESP_WIFI_ENABLE_SAE_H2E
+        endchoice
+
+        config ESP_WIFI_PW_ID
+            string "PASSWORD IDENTIFIER"
+            depends on  ESP_STATION_EXAMPLE_WPA3_SAE_PWE_HASH_TO_ELEMENT || ESP_STATION_EXAMPLE_WPA3_SAE_PWE_BOTH
+            default ""
+            help
+                password identifier for SAE H2E
+
+        config ESP_MAXIMUM_RETRY
+            int "Maximum retries"
+            default 5
+            help
+                Set the maximum number of retries to avoid station reconnecting to the AP forever when the AP is really inexistent.
+
+        choice ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD
+            prompt "WiFi Scan auth mode threshold"
+            default ESP_WIFI_AUTH_WPA2_PSK
+            help
+                The weakest authmode to accept in the scan mode.
+                This value defaults to ESP_WIFI_AUTH_WPA2_PSK in case password is present and ESP_WIFI_AUTH_OPEN is used.
+                Please select ESP_WIFI_AUTH_WEP/ESP_WIFI_AUTH_WPA_PSK in case AP is operating in WEP/WPA mode.
+
+            config ESP_WIFI_AUTH_OPEN
+                bool "OPEN"
+            config ESP_WIFI_AUTH_WEP
+                bool "WEP"
+            config ESP_WIFI_AUTH_WPA_PSK
+                bool "WPA PSK"
+            config ESP_WIFI_AUTH_WPA2_PSK
+                bool "WPA2 PSK"
+            config ESP_WIFI_AUTH_WPA_WPA2_PSK
+                bool "WPA/WPA2 PSK"
+            config ESP_WIFI_AUTH_WPA3_PSK
+                bool "WPA3 PSK"
+            config ESP_WIFI_AUTH_WPA2_WPA3_PSK
+                bool "WPA2/WPA3 PSK"
+            config ESP_WIFI_AUTH_WAPI_PSK
+                bool "WAPI PSK"
+        endchoice
+
+        config ESP_DAP_SOFTAP_SSID
+            string "SoftAP network name (SSID)"
+            default "cmsis_dap_tcp_esp32"
+            help
+                SSID advertised by the ESP32 in SoftAP mode (1-32 bytes).
+
+        config ESP_DAP_SOFTAP_PASSWORD
+            string "SoftAP WPA2 password"
+            default ""
+            help
+                Set a unique 8-63 byte password before flashing.
+                Empty passwords are intentionally rejected at startup.
+
+        config ESP_DAP_SOFTAP_CHANNEL
+            int "SoftAP WiFi channel"
+            range 1 11
+            default 1
+
+        config ESP_DAP_SOFTAP_MAX_CONNECTIONS
+            int "Maximum simultaneous SoftAP clients"
+            range 1 4
+            default 4
+
+        endif
+
+    endmenu
+
+    config ESP_DAP_VENDOR_ID
+        string "CMSIS-DAP vendor string"
+        default "OpenOCD"
+        help
+            Reported to the host (e.g. OpenOCD) as the CMSIS-DAP vendor
+            string.
+
+    config ESP_DAP_PRODUCT_ID
+        string "CMSIS-DAP product string"
+        default "CMSIS-DAP-TCP device"
+        help
+            Reported to the host (e.g. OpenOCD) as the CMSIS-DAP product
+            string. Board-specific sdkconfig fragments should override this
+            with something identifying the board, e.g.
+            "CMSIS-DAP-TCP Xiao ESP32-C6 alt".
+
+    config ESP_DAP_TARGET_FIXED
+        bool "Report a Fixed Target device/board to the host"
+        default n
+        help
+            Report the TARGET_DEVICE/TARGET_BOARD DAP_Info strings below
+            to the host. This is intended to be used when the Debug Unit
+            is permanently connected to a single target, such as being
+            integrated onto the same PCB. If that is not the case, then
+            leave this disabled.
+
+    config ESP_DAP_TARGET_DEVICE_VENDOR
+        string "Fixed Target silicon device vendor string"
+        default ""
+        depends on ESP_DAP_TARGET_FIXED
+        help
+            Reported to the host as the Target Device Vendor string.
+            Usually the silicon vendor name, such as Arm.
+
+    config ESP_DAP_TARGET_DEVICE_NAME
+        string "Fixed Target silicon device name string"
+        default ""
+        depends on ESP_DAP_TARGET_FIXED
+        help
+            Reported to the host as the Target Device Name string.
+            Usually the silicon device name, such as Cortex-M3.
+
+    config ESP_DAP_TARGET_BOARD_VENDOR
+        string "Fixed Target board vendor string"
+        default ""
+        depends on ESP_DAP_TARGET_FIXED
+        help
+            Reported to the host as the Target Board Vendor string.
+            Usually the manufacturer name of the PCB.
+
+    config ESP_DAP_TARGET_BOARD_NAME
+        string "Fixed Target board name string"
+        default ""
+        depends on ESP_DAP_TARGET_FIXED
+        help
+            Reported to the host as the Target Board Name string.
+            Usually the model name of the board itself.
+
+    config ESP_DAP_TCP_MAX_PKT_SIZE
+        int "CMSIS-DAP maximum packet size"
+        default 4096
+        help
+            Choose the maximum size of a CMSIS-DAP request or response.
+            Should be >= to that used by the client. Shared by all
+            CMSIS-DAP interfaces.
+
+    config ESP_DAP_TCP_USE_KEEPALIVE
+        bool "Enable TCP keep-alive packets and disconnect on timeout"
+        default y
+        help
+            To detect dead clients, use TCP keepalives and drop the connection
+            if a timeout occurs. Shared by all CMSIS-DAP interfaces.
+
+    config ESP_DAP_TCP_KEEPALIVE_TIMEOUT
+        int "TCP keep-alive timeout in seconds"
+        default 10
+        depends on ESP_DAP_TCP_USE_KEEPALIVE
+        help
+            Drop the connection if a client does not respond for this
+            number of seconds.
+
+    config ESP_DAP_DISABLE_WIFI_POWER_SAVE
+        bool "Disable WiFi power saving mode for higher performance."
+        default y
+        help
+            Uses more power but improves throughput.
+
+    config ESP_DAP_IO_PORT_WRITE_CYCLES
+        int "Number of CPU clock cycles for a GPIO port write"
+        default 72
+        help
+            This number may need to be tuned to get an accurate SWCLK/TCK
+            frequency.
+
+    config ESP_DAP_DELAY_SLOW_CYCLES
+        int "Number of CPU clock cycles for one delay loop iteration"
+        default 5
+        help
+            This number may need to be tuned to get an accurate SWCLK/TCK
+            frequency.
+
+    config ESP_DAP_TCP_DEBUG_PRINTING
+        bool "Enable debug logging for the CMSIS-DAP TCP server"
+        default n
+        help
+            Print additional debug messages from cmsis_dap_tcp.c. Will
+            impact performance.
+
+    config ESP_PRINT_CPU_USAGE
+        bool "Print CPU usage for each task"
+        default n
+        select FREERTOS_USE_TRACE_FACILITY
+        select FREERTOS_GENERATE_RUN_TIME_STATS
+        help
+            For debugging, periodically print CPU usage of each task to the
+            console. Also manually enable FREERTOS_RUN_TIME_COUNTER_TYPE_U64
+            to avoid counter overflow.
+
+endmenu
