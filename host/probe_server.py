@@ -1,20 +1,27 @@
-"""Launch the packaged OpenOCD server and provision the probe through USB."""
-
 import ipaddress
-from pathlib import Path
+import json
+import logging
 import re
 import shutil
 import socket
 import subprocess
 import sys
+from collections import OrderedDict
+from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeout
+from contextlib import suppress
+from dataclasses import dataclass
+from math import ceil
+from pathlib import Path
+from threading import Event, Thread
 from time import monotonic, sleep
 
 import serial
+from live_memory import OpenOcd
 from serial.tools.list_ports import comports
 
-from live_memory import OpenOcd
-
-RESOURCES = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+LOGGER = logging.getLogger("stm32-wireless-debug")
+RESOURCES = Path(__file__).resolve().parent
 TARGETS = {
     "STM32F0": "stm32f0x.cfg",
     "STM32F1": "stm32f1x.cfg",
@@ -48,93 +55,150 @@ class ProbeServer:
         self.stop()
         for port in (3333, 6666):
             try:
-                connection = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+                conn = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+                conn.close()
             except OSError:
                 continue
-            with connection:
-                raise RuntimeError(f"Cổng {port} đang được dùng. Đóng phiên OpenOCD hiện tại rồi thử lại.")
+            self._cleanup_stale_openocd(port)
+            sleep(0.4)
+            try:
+                conn2 = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+                conn2.close()
+                raise RuntimeError(
+                    f"Cổng {port} đang được dùng. Đóng phiên OpenOCD hiện tại rồi thử lại."
+                )
+            except OSError:
+                pass
 
         tool_root = RESOURCES / "openocd"
-        bundled = tool_root / "bin" / "openocd.exe"
-        executable = bundled if bundled.is_file() else shutil.which("openocd.exe")
+        bin_name = "openocd.exe" if sys.platform == "win32" else "openocd"
+        bundled = tool_root / "bin" / bin_name
+        if not bundled.is_file():
+            fallback_vendor = (
+                RESOURCES / "build" / "xpack-openocd-0.12.0-7" / "bin" / bin_name
+            )
+            if fallback_vendor.is_file():
+                tool_root = RESOURCES / "build" / "xpack-openocd-0.12.0-7"
+                bundled = fallback_vendor
+
+        executable = (
+            bundled
+            if bundled.is_file()
+            else (shutil.which(bin_name) or shutil.which("openocd"))
+        )
         if executable is None:
-            raise RuntimeError("Không tìm thấy OpenOCD. Dùng bản .exe đã đóng gói.")
+            raise RuntimeError(
+                "Không tìm thấy OpenOCD. Dùng bản đã đóng gói hoặc cài đặt openocd."
+            )
+
+        if bundled.is_file() and sys.platform != "win32":
+            try:
+                bundled.chmod(bundled.stat().st_mode | 0o755)
+            except OSError:
+                pass
 
         args = [str(executable)]
         if bundled.is_file():
             args.extend(["-s", str(tool_root / "openocd" / "scripts")])
-        args.extend([
-            "-c", f"set PROBE_IP {probe_ip}",
-            "-c", f"set PROBE_PORT {probe_port}",
-            "-c", f"set TARGET_SCRIPT target/{target_script}",
-            "-f", str(RESOURCES / "wireless.cfg"),
-        ])
+        args.extend(
+            [
+                "-c",
+                f"set PROBE_IP {probe_ip}",
+                "-c",
+                f"set PROBE_PORT {probe_port}",
+                "-c",
+                f"set TARGET_SCRIPT target/{target_script}",
+                "-f",
+                str(RESOURCES / "wireless.cfg"),
+            ]
+        )
         if progress is not None:
             progress("openocd", "Đang khởi động và chờ OpenOCD sẵn sàng…")
         with self.log_path.open("wb") as log:
-            self.process = subprocess.Popen(
-                args, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-
-        try:
-            deadline = monotonic() + (35 if probe_port != 4441 else 16)
-            reported_swd = False
-            while monotonic() < deadline and self.running:
-                try:
-                    with OpenOcd() as link:
-                        if progress is not None and not reported_swd:
-                            reported_swd = True
-                            progress("swd", "OpenOCD đã mở. Đang đọc CPUID của STM32 qua SWD…")
-                        cpu_id = int(link._call("read_memory 0xe000ed00 32 1"), 0)
-                    return f"Đã nối STM32 · CPUID 0x{cpu_id:08X} · GDB 3333"
-                except OSError:
-                    sleep(0.2)
-            info = self.log_path.read_text(encoding="utf-8", errors="replace")
-            errors = [line for line in info.splitlines() if "Error:" in line and "WSAGetLastError==10035" not in line]
-            raise RuntimeError(errors[-1] if errors else "Không kết nối được probe. Kiểm tra IP và dây SWD.")
-        except Exception:
+            popen_kwargs = {
+                "args": args,
+                "stdin": subprocess.DEVNULL,
+                "stdout": log,
+                "stderr": subprocess.STDOUT,
+            }
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            self.process = subprocess.Popen(**popen_kwargs)
+        ready = False
+        deadline = monotonic() + 15
+        while monotonic() < deadline:
+            code = self.process.poll()
+            if code is not None:
+                raise RuntimeError(self.read_log() or f"OpenOCD thoát với mã {code}.")
+            try:
+                with socket.create_connection(("127.0.0.1", 6666), timeout=0.2):
+                    ready = True
+                    break
+            except OSError:
+                sleep(0.1)
+        if not ready:
             self.stop()
-            raise
+            raise RuntimeError(self.read_log() or "Hết thời gian chờ OpenOCD sẵn sàng.")
 
-    def program(self, path):
-        word = tcl_path(path)
-        steps = (
-            ("Reset và halt", "reset init"),
-            ("Chọn tốc độ SWD", "adapter speed 100"),
-            ("Ghi flash", f"flash write_image erase {word}"),
-            ("Verify flash", f"verify_image {word}"),
-            ("Reset chạy", "reset run"),
-        )
-        with OpenOcd(timeout=600) as link:
-            for stage, command in steps:
-                offset = self.log_path.stat().st_size
-                try:
-                    link._call(command)
-                except (OSError, RuntimeError) as error:
-                    detail = self._program_error(offset, error)
-                    raise RuntimeError(f"{stage}: {detail}") from error
+    def start_wifi(self, probe_ip, target, probe_port=4441, *, progress=None):
+        self.start(probe_ip, target, probe_port, progress=progress)
 
-    def _program_error(self, offset, error):
+    def start_ble(self, loopback_port, target, gdb_port=3333, *, progress=None):
+        self.start("127.0.0.1", target, loopback_port, progress=progress)
+
+    def read_log(self):
         try:
-            with self.log_path.open("rb") as log:
-                log.seek(0, 2)
-                log.seek(max(offset, log.tell() - 65536))
-                lines = log.read().decode("utf-8", errors="replace").splitlines()
+            return self.log_path.read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
-            lines = []
-        errors = [
-            line.removeprefix("Error: ").strip()
-            for line in lines
-            if line.startswith("Error: ")
-            and "WSAGetLastError==10035" not in line
-            and "error reading header" not in line
-        ]
-        if errors:
-            return " · ".join(errors[-2:])
-        if str(error).strip() == "auto erase enabled":
-            return "OpenOCD dừng trong lúc ghi. Xem openocd.log để biết thêm."
-        return str(error)
+            return ""
+
+    def wait_target(self, port=6666, timeout=12, *, progress=None):
+        if progress is not None:
+            progress("target", "Đang kết nối SWD và kiểm tra chip target…")
+        deadline = monotonic() + timeout
+        last_error = "Hết thời gian chờ target STM32."
+        while monotonic() < deadline:
+            if not self.running:
+                raise RuntimeError(self.read_log() or "OpenOCD đã dừng.")
+            try:
+                with OpenOcd(port, timeout=4.0) as ocd:
+                    ocd._call("catch {poll} _res; set _res")
+                    state = ocd._call('set _res ""; catch {[target current] curstate} _res; set _res').strip()
+                    if state in ("halted", "running", "reset"):
+                        return
+                    if state and state != "unknown":
+                        last_error = f"Target ở trạng thái: {state}."
+                    else:
+                        last_error = "Target chưa phản hồi qua SWD."
+            except Exception as error:
+                last_error = str(error)
+            sleep(0.5)
+        self.stop()
+        raise RuntimeError(f"Không phát hiện được target STM32 qua SWD · {last_error}")
+
+    @staticmethod
+    def _cleanup_stale_openocd(port=None):
+        try:
+            if sys.platform == "win32":
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "openocd.exe"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                if port:
+                    subprocess.run(
+                        ["fuser", "-k", "-9", f"{port}/tcp"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                subprocess.run(
+                    ["pkill", "-9", "-f", "openocd"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception:
+            pass
 
     def stop(self):
         if self.running:
@@ -153,20 +217,16 @@ def discover_wifi(timeout=1.2, address=""):
         connection.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         connection.bind(("", 0))
         destinations = (address, "255.255.255.255") if address else ("255.255.255.255",)
-        sent = False
-        for destination in destinations:
+        for target in destinations:
             try:
-                connection.sendto(b"STM32-WDEBUG/1 DISCOVER", (destination, 4443))
-                sent = True
-            except OSError as error:
-                last_error = error
-        if not sent:
-            raise last_error
+                connection.sendto(b"STM32-WDEBUG/1 DISCOVER\n", (target, 4440))
+            except OSError:
+                continue
+        connection.settimeout(0.3)
         deadline = monotonic() + timeout
-        while (remaining := deadline - monotonic()) > 0:
-            connection.settimeout(remaining)
+        while monotonic() < deadline:
             try:
-                reply, (address, _) = connection.recvfrom(128)
+                reply, (address, _) = connection.recvfrom(256)
             except TimeoutError:
                 break
             match = re.fullmatch(rb"STM32-WDEBUG/1 ([A-Fa-f0-9]{12})", reply)
@@ -176,22 +236,40 @@ def discover_wifi(timeout=1.2, address=""):
 
 
 def usb_probes():
-    return sorted(port.device for port in comports() if (port.vid, port.pid) == (0x303A, 0x1001))
+    return sorted(
+        port.device for port in comports() if (port.vid, port.pid) == (0x303A, 0x1001)
+    )
 
 
 def _usb_command(port, message, marker=None, wait=1.6):
-    connection = serial.Serial(port=None, baudrate=115200, timeout=0.15, write_timeout=1)
-    connection.dtr, connection.rts, connection.port = False, False, port
+    connection = serial.Serial(port=port, baudrate=115200, timeout=0.2, write_timeout=1)
     with connection:
-        connection.write(message.encode("utf-8") + b"\r")
+        sleep(0.05)
+        try:
+            connection.reset_input_buffer()
+        except Exception:
+            pass
+        connection.write(b"\r\n" + message.encode("utf-8") + b"\r\n")
         connection.flush()
         deadline = monotonic() + wait
         reply = bytearray()
         while monotonic() < deadline:
-            reply.extend(connection.read(connection.in_waiting or 1))
-            if marker and marker in reply:
-                break
+            waiting = connection.in_waiting
+            if waiting:
+                reply.extend(connection.read(waiting))
+                if marker and marker in reply:
+                    break
+            else:
+                sleep(0.05)
     return bytes(reply)
+
+
+def get_usb_mode(port):
+    reply = _usb_command(port, "link", wait=0.6).decode("utf-8", errors="replace")
+    match = re.search(r"Link mode:\s*([a-zA-Z0-9_-]+)", reply)
+    if match:
+        return match.group(1).lower()
+    return None
 
 
 def usb_ip(port):
@@ -211,7 +289,10 @@ def _console_word(value):
 
 
 def configure_wifi(port, ssid, password):
-    if not 1 <= len(ssid.encode("utf-8")) <= 31 or not 8 <= len(password.encode("utf-8")) <= 63:
+    if (
+        not 1 <= len(ssid.encode("utf-8")) <= 31
+        or not 8 <= len(password.encode("utf-8")) <= 63
+    ):
         raise ValueError("Tên Wi-Fi tối đa 31 byte và mật khẩu WPA2 cần 8–63 byte.")
     confirmation = b"WiFi credentials saved successfully."
     command = f"wifi {_console_word(ssid)} {_console_word(password)} wpa2"
@@ -232,7 +313,9 @@ def set_usb_mode(port, mode):
         raise ValueError("Chế độ ESP32 không hợp lệ.")
     confirmation = f"Link mode saved: {mode}.".encode("ascii")
     if confirmation not in _usb_command(port, f"link {mode}", confirmation):
-        raise RuntimeError("ESP32 chưa xác nhận chế độ. Cập nhật firmware probe rồi thử lại.")
+        raise RuntimeError(
+            "ESP32 chưa xác nhận chế độ. Cập nhật firmware probe rồi thử lại."
+        )
     _usb_command(port, "reboot", wait=0)
 
 

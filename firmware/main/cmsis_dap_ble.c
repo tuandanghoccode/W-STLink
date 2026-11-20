@@ -15,6 +15,7 @@
 #include "DAP_config.h"
 #include "DAP.h"
 #include "cmsis_dap_ble.h"
+#include "wifi.h"
 
 #define FRAME_HEADER_SIZE 8
 #define NO_CONNECTION BLE_HS_CONN_HANDLE_NONE
@@ -25,6 +26,7 @@ static const char tag[] = "cmsis_dap_ble";
 static const ble_uuid128_t service_uuid = PROBE_UUID(1);
 static const ble_uuid128_t rx_uuid = PROBE_UUID(2);
 static const ble_uuid128_t tx_uuid = PROBE_UUID(3);
+static const ble_uuid128_t wifi_cfg_uuid = PROBE_UUID(4);
 static uint16_t tx_handle;
 static uint8_t address_type;
 static char device_name[sizeof("STM32-WDEBUG-000000")];
@@ -92,6 +94,48 @@ static int gatt_access(uint16_t connection, uint16_t attribute,
     return error;
 }
 
+static int gatt_wifi_cfg_access(uint16_t connection, uint16_t attribute,
+                               struct ble_gatt_access_ctxt *context, void *unused)
+{
+    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        char buf[128] = {0};
+        uint16_t len = OS_MBUF_PKTLEN(context->om);
+        if (len == 0 || len >= sizeof(buf)) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        if (os_mbuf_copydata(context->om, 0, len, buf) != 0) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        buf[len] = '\0';
+        char *sep = strpbrk(buf, "\n\t");
+        if (!sep) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        *sep = '\0';
+        const char *ssid = buf;
+        char *pwd = sep + 1;
+        size_t pwd_len = strlen(pwd);
+        while (pwd_len > 0 && (pwd[pwd_len - 1] == '\r' || pwd[pwd_len - 1] == '\n')) {
+            pwd[--pwd_len] = '\0';
+        }
+        ESP_LOGI(tag, "Received Wi-Fi config over BLE: SSID='%s'", ssid);
+        esp_err_t err = wifi_add_or_promote_ap(ssid, pwd, WIFI_AUTH_WPA2_PSK);
+        return (err == ESP_OK) ? 0 : BLE_ATT_ERR_UNLIKELY;
+    } else if (context->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        wifi_saved_ap_t list[WIFI_MAX_SAVED_APS];
+        int count = wifi_get_saved_aps(list, WIFI_MAX_SAVED_APS);
+        char resp[128] = {0};
+        if (count > 0) {
+            snprintf(resp, sizeof(resp), "OK: %s (%d APs saved)", list[0].ssid, count);
+        } else {
+            snprintf(resp, sizeof(resp), "NONE (0 APs saved)");
+        }
+        int rc = os_mbuf_append(context->om, resp, strlen(resp));
+        return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+}
+
 static const struct ble_gatt_svc_def services[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
@@ -100,13 +144,18 @@ static const struct ble_gatt_svc_def services[] = {
             {
                 .uuid = &rx_uuid.u,
                 .access_cb = gatt_access,
-                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
             },
             {
                 .uuid = &tx_uuid.u,
                 .access_cb = gatt_access,
                 .flags = BLE_GATT_CHR_F_NOTIFY,
                 .val_handle = &tx_handle,
+            },
+            {
+                .uuid = &wifi_cfg_uuid.u,
+                .access_cb = gatt_wifi_cfg_access,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_READ,
             },
             {0},
         },
@@ -118,6 +167,7 @@ static int gap_event(struct ble_gap_event *event, void *unused);
 
 static void advertise(void)
 {
+    if (ble_gap_adv_active()) return;
     const struct ble_hs_adv_fields advertisement = {
         .flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP,
         .uuids128 = &service_uuid,
@@ -132,6 +182,8 @@ static void advertise(void)
     const struct ble_gap_adv_params params = {
         .conn_mode = BLE_GAP_CONN_MODE_UND,
         .disc_mode = BLE_GAP_DISC_MODE_GEN,
+        .itvl_min = 160, // 100ms interval for cool & low power
+        .itvl_max = 240, // 150ms interval
     };
     int rc = ble_gap_adv_set_fields(&advertisement);
     if (rc == 0)
@@ -165,7 +217,11 @@ static int gap_event(struct ble_gap_event *event, void *unused)
             advertise();
         break;
     case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGI(tag, "BLE disconnected: %d. Restarting advertising...", event->disconnect.reason);
         change_connection(NO_CONNECTION);
+        if (ble_gap_adv_active()) {
+            ble_gap_adv_stop();
+        }
         advertise();
         break;
     case BLE_GAP_EVENT_SUBSCRIBE:
@@ -340,7 +396,7 @@ esp_err_t cmsis_dap_ble_start(const struct cmsis_dap_gpio_config *gpio, const ch
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
-    if (ble_att_set_preferred_mtu(247) != 0 ||
+    if (ble_att_set_preferred_mtu(512) != 0 ||
         ble_svc_gap_device_name_set(device_name) != 0 ||
         ble_gatts_count_cfg(services) != 0 ||
         ble_gatts_add_svcs(services) != 0) {
@@ -364,4 +420,16 @@ esp_err_t cmsis_dap_ble_start(const struct cmsis_dap_gpio_config *gpio, const ch
 fail:
     nimble_port_deinit();
     return err;
+}
+
+void cmsis_dap_ble_ensure_advertising(void)
+{
+    if (link.connection == NO_CONNECTION && !ble_gap_adv_active()) {
+        advertise();
+    }
+}
+
+bool cmsis_dap_ble_is_connected(void)
+{
+    return link.connection != NO_CONNECTION;
 }

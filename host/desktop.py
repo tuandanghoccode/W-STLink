@@ -1,19 +1,31 @@
+import atexit
+
 """Standalone Windows app for the wireless STM32 probe."""
 
+import os
+import tkinter as tk
 from ipaddress import IPv4Address
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from threading import Event
 from time import monotonic
-import os
-import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 
-from ble_bridge import BleBridge, discover_ble_probes
+from ble_bridge import BleBridge, configure_wifi_ble, discover_ble_probes
 from live_memory import OpenOcd, display_value, manual_symbol, numeric_value
 from live_watch import LiveWatch
 from plot_window import PlotWindow
-from probe_server import ProbeServer, TARGETS, configure_wifi, discover_wifi, set_usb_mode, usb_ip, usb_probes
+from probe_server import (
+    TARGETS,
+    ProbeServer,
+    configure_wifi,
+    discover_wifi,
+    get_usb_mode,
+    set_usb_mode,
+    usb_ip,
+    usb_probes,
+)
+from robotics_tab import RoboticsTab
 from rtt_window import RttWindow
 from target_tools import RttCapture, rtt_address, verify_elf
 from watch_profiles import ProfileStore
@@ -21,9 +33,19 @@ from watch_profiles import ProfileStore
 TRANSPORTS = ("Wi-Fi", "Bluetooth")
 CHECK_INTERVAL = 4
 RETRY_INTERVAL = 6
-LINK_STEPS = (("probe", "Chuẩn bị ESP32"), ("openocd", "Mở OpenOCD"), ("swd", "Kiểm tra SWD"))
-CORE_LABELS = {"running": "Đang chạy", "debug-running": "Đang chạy debug", "halted": "Đã dừng",
-               "reset": "Đang reset", "unavailable": "Chưa truy cập được", "unknown": "Chưa rõ trạng thái"}
+LINK_STEPS = (
+    ("probe", "Chuẩn bị ESP32"),
+    ("openocd", "Mở OpenOCD"),
+    ("swd", "Kiểm tra SWD"),
+)
+CORE_LABELS = {
+    "running": "Đang chạy",
+    "debug-running": "Đang chạy debug",
+    "halted": "Đã dừng",
+    "reset": "Đang reset",
+    "unavailable": "Chưa truy cập được",
+    "unknown": "Chưa rõ trạng thái",
+}
 
 
 class PresetDialog(simpledialog.Dialog):
@@ -37,8 +59,13 @@ class PresetDialog(simpledialog.Dialog):
         ttk.Label(panel, text="Chọn các biến cần lưu").pack(anchor="w", padx=8)
         container = ttk.Frame(panel)
         container.pack(fill="both", expand=True, padx=8, pady=6)
-        self.variables = tk.Listbox(container, selectmode="extended", height=min(12, len(self.options)),
-                                    width=55, exportselection=False)
+        self.variables = tk.Listbox(
+            container,
+            selectmode="extended",
+            height=min(12, len(self.options)),
+            width=55,
+            exportselection=False,
+        )
         scrollbar = ttk.Scrollbar(container, command=self.variables.yview)
         self.variables.configure(yscrollcommand=scrollbar.set)
         self.variables.pack(side="left", fill="both", expand=True)
@@ -52,13 +79,24 @@ class PresetDialog(simpledialog.Dialog):
         name = self.name.get().strip()
         selected = self.variables.curselection()
         if not name or not selected:
-            messagebox.showerror("Thiếu thông tin", "Nhập tên và chọn ít nhất một biến.", parent=self)
+            messagebox.showerror(
+                "Thiếu thông tin", "Nhập tên và chọn ít nhất một biến.", parent=self
+            )
             return False
-        self.result = (name, [
-            {"name": symbol.label, "manual": symbol.manual, "address": symbol.address,
-             "size": symbol.size, "kind": symbol.kind, "raw": raw}
-            for _, symbol, _, raw in (self.options[index] for index in selected)
-        ])
+        self.result = (
+            name,
+            [
+                {
+                    "name": symbol.label,
+                    "manual": symbol.manual,
+                    "address": symbol.address,
+                    "size": symbol.size,
+                    "kind": symbol.kind,
+                    "raw": raw,
+                }
+                for _, symbol, _, raw in (self.options[index] for index in selected)
+            ],
+        )
         return True
 
 
@@ -78,8 +116,10 @@ class DesktopApp(LiveWatch):
         self.core_state = None
         self.keep_link = self.closing = False
         self.next_check = self.next_retry = 0.0
+        self.wifi_ip = ""
+        self.ble_address = ""
 
-        super().__init__(root, None, 6666)
+        super().__init__(root, None, 6666, defer_ui=True)
         self.connection_text = tk.StringVar(value="Chọn cách kết nối ESP32.")
         self.profile_name = tk.StringVar(value=self.profile)
         self.transport = tk.StringVar(value=TRANSPORTS[0])
@@ -89,35 +129,57 @@ class DesktopApp(LiveWatch):
         self.link_detail = tk.StringVar(value="Chọn Wi-Fi hoặc Bluetooth rồi kết nối.")
 
         profiles = ttk.Frame(self)
-        profiles.pack(fill="x", pady=(0, 8), before=self.winfo_children()[0])
+        profiles.pack(fill="x", pady=(0, 6))
         ttk.Label(profiles, text="Profile").pack(side="left")
-        self.profile_box = ttk.Combobox(profiles, textvariable=self.profile_name, values=list(self.profiles.profiles),
-                                        width=22, state="readonly")
+        self.profile_box = ttk.Combobox(
+            profiles,
+            textvariable=self.profile_name,
+            values=list(self.profiles.profiles),
+            width=22,
+            state="readonly",
+        )
         self.profile_box.pack(side="left", padx=6)
         self.profile_box.bind("<<ComboboxSelected>>", self.change_profile)
-        self.profile_button = self.button(profiles, "Lưu profile mới", self.save_profile_as)
-        ttk.Label(profiles, textvariable=self.connection_text, wraplength=580).pack(side="left", padx=8)
+        self.profile_button = self.button(
+            profiles, "Lưu profile mới", self.save_profile_as
+        )
+        self.connection_label = ttk.Label(
+            profiles, textvariable=self.connection_text, wraplength=580
+        )
+        self.connection_label.pack(side="left", padx=8, fill="x", expand=True)
 
         connection = ttk.Frame(self)
-        connection.pack(fill="x", pady=(0, 8), after=profiles)
-        self.transport_box = ttk.Combobox(connection, textvariable=self.transport, values=TRANSPORTS,
-                                          width=10, state="readonly")
+        connection.pack(fill="x", pady=(0, 6))
+        self.transport_box = ttk.Combobox(
+            connection,
+            textvariable=self.transport,
+            values=TRANSPORTS,
+            width=10,
+            state="readonly",
+        )
         self.transport_box.pack(side="left")
-        self.transport_box.bind("<<ComboboxSelected>>", lambda _: self.refresh_buttons())
-        self.ip_entry = ttk.Entry(connection, textvariable=self.ip, width=16)
+        self.transport_box.bind("<<ComboboxSelected>>", self._on_transport_changed)
+        self.ip_entry = ttk.Entry(connection, textvariable=self.ip, width=22)
         self.ip_entry.pack(side="left", padx=6)
         self.ip_entry.bind("<Return>", lambda _: self.toggle_connection())
-        self.target_box = ttk.Combobox(connection, textvariable=self.target, values=list(TARGETS),
-                                       width=10, state="readonly")
+        self.target_box = ttk.Combobox(
+            connection,
+            textvariable=self.target,
+            values=list(TARGETS),
+            width=10,
+            state="readonly",
+        )
         self.target_box.pack(side="left")
         self.connect_button = self.button(connection, "Kết nối", self.toggle_connection)
         self.find_button = self.button(connection, "Tìm probe", self.find_probe)
         self.usb_button = self.button(connection, "Tìm IP qua USB", self.find_usb)
         self.wifi_button = self.button(connection, "Cài Wi-Fi", self.setup_wifi)
-        self.mode_button = self.button(connection, "Đổi chế độ ESP", self.change_usb_mode)
+        self.mode_button = self.button(
+            connection, "Đổi chế độ ESP", self.change_usb_mode
+        )
 
         link = ttk.Frame(self)
-        link.pack(fill="x", pady=(0, 8), after=connection)
+        link.pack(fill="x", pady=(0, 6))
         steps = ttk.Frame(link)
         steps.pack(fill="x")
         self.link_indicators = [ttk.Label(steps) for _ in LINK_STEPS]
@@ -125,13 +187,20 @@ class DesktopApp(LiveWatch):
             indicator.pack(side="left", padx=(0, 16))
         self.link_pulse = ttk.Progressbar(steps, length=90, mode="indeterminate")
         ttk.Label(steps, textvariable=self.core_text).pack(side="right")
-        ttk.Label(link, textvariable=self.link_detail, wraplength=760).pack(anchor="w", pady=(3, 0))
+        self.link_detail_label = ttk.Label(
+            link, textvariable=self.link_detail, wraplength=760
+        )
+        self.link_detail_label.pack(anchor="w", pady=(3, 0), fill="x", expand=True)
         self.show_link("idle", self.link_detail.get())
 
         debug = ttk.Frame(self)
-        debug.pack(fill="x", pady=(0, 8), after=link)
-        self.halt_button = self.button(debug, "Dừng chip", lambda: self.run_control("halt"))
-        self.resume_button = self.button(debug, "Chạy tiếp", lambda: self.run_control("resume"))
+        debug.pack(fill="x", pady=(0, 6))
+        self.halt_button = self.button(
+            debug, "Dừng chip", lambda: self.run_control("halt")
+        )
+        self.resume_button = self.button(
+            debug, "Chạy tiếp", lambda: self.run_control("resume")
+        )
         self.program_button = self.button(debug, "Nạp ELF", self.program)
         self.verify_button = self.button(debug, "So khớp ELF", self.check_elf)
         self.button(debug, "Đồ thị / CSV", self.open_plot)
@@ -139,8 +208,28 @@ class DesktopApp(LiveWatch):
         self.save_preset_button = self.button(debug, "Lưu tuning", self.save_preset)
         self.apply_preset_button = self.button(debug, "Áp tuning", self.choose_preset)
 
+        # Tabbed workspace: Tab 1 = Chip Debug, Tab 2 = Control & Robotics
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, pady=(2, 4))
+
+        self.tab_debug = ttk.Frame(self.notebook, padding=4)
+        self.notebook.add(self.tab_debug, text=" 🐞 Debug chip ")
+        self.setup_watch_ui(self.tab_debug)
+
+        self.tab_robotics = RoboticsTab(self.notebook, app=self)
+        self.notebook.add(self.tab_robotics, text=" 🤖 Điều khiển & Robot ")
+
+        self.status_label = ttk.Label(self, textvariable=self.status, wraplength=760)
+        self.status_label.pack(fill="x", pady=(2, 0))
+
+        self.pack(fill="both", expand=True)
+
         self.load_profile()
         self.refresh_buttons()
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.bind("<Configure>", self._on_window_configure)
+        atexit.register(self.stop_link)
+        self.root.after_idle(self.poll)
         self.root.after(100, self.startup)
 
     @staticmethod
@@ -149,17 +238,72 @@ class DesktopApp(LiveWatch):
         button.pack(side="left", padx=(0, 6))
         return button
 
+    def _on_transport_changed(self, _event=None):
+        transport = self.transport.get()
+        if transport == "Bluetooth":
+            cur = self.ip.get().strip()
+            if cur and "." in cur:
+                self.wifi_ip = cur
+            self.ip.set(self.ble_address or "")
+            self.refresh_buttons()
+
+            def check_usb_ble():
+                probes = usb_probes()
+                if probes:
+                    try:
+                        mode = get_usb_mode(probes[0])
+                        if mode == "wifi":
+                            return "Chế độ Bluetooth. ESP32 đang ở Wi-Fi. Bấm 'Đổi chế độ ESP' hoặc giữ nút BOOT 1.5s để đổi sang BLE."
+                    except Exception:
+                        pass
+                return "Chế độ Bluetooth. Bấm 'Tìm probe' để quét BLE gần đây."
+
+            self.executor.submit(check_usb_ble).add_done_callback(
+                lambda f: self.root.after_idle(
+                    lambda: self.connection_text.set(f.result()) if f.result() else None
+                )
+            )
+        else:
+            cur = self.ip.get().strip()
+            if cur and (":" in cur or "-" in cur):
+                self.ble_address = cur
+            self.ip.set(self.wifi_ip or "")
+            self.refresh_buttons()
+
+            def check_usb_wifi():
+                probes = usb_probes()
+                if probes:
+                    try:
+                        mode = get_usb_mode(probes[0])
+                        if mode == "ble":
+                            return "Chế độ Wi-Fi. ESP32 đang ở Bluetooth. Bấm 'Đổi chế độ ESP' hoặc giữ nút BOOT 1.5s để đổi sang Wi-Fi."
+                    except Exception:
+                        pass
+                return "Chế độ Wi-Fi. Nhập IP hoặc bấm 'Tìm probe'."
+
+            self.executor.submit(check_usb_wifi).add_done_callback(
+                lambda f: self.root.after_idle(
+                    lambda: self.connection_text.set(f.result()) if f.result() else None
+                )
+            )
+
     def load_profile(self):
         settings = self.profiles.profiles[self.profile]
-        self.ip.set(self.setting_text(settings, "ip"))
-        self.last_ip = self.ip.get()
-        self.mac = self.setting_text(settings, "mac")
+        self.wifi_ip = self.setting_text(settings, "ip")
         self.ble_address = self.setting_text(settings, "ble_address")
         transport = self.setting_text(settings, "transport")
         self.transport.set(transport if transport in TRANSPORTS else TRANSPORTS[0])
+        if self.transport.get() == "Bluetooth":
+            self.ip.set(self.ble_address)
+        else:
+            self.ip.set(self.wifi_ip)
+        self.last_ip = self.ip.get()
+        self.mac = self.setting_text(settings, "mac")
         target = self.setting_text(settings, "target")
         self.target.set(target if target in TARGETS else "STM32F4")
-        self.presets = settings.get("presets") if isinstance(settings.get("presets"), dict) else {}
+        self.presets = (
+            settings.get("presets") if isinstance(settings.get("presets"), dict) else {}
+        )
         self.clear_watch()
         self.available = {}
         self.combo["values"] = []
@@ -188,7 +332,9 @@ class DesktopApp(LiveWatch):
             elif isinstance(item, dict):
                 kind = item.get("format")
                 try:
-                    symbol = manual_symbol(item["address"], item["size"], item["kind"], item["name"])
+                    symbol = manual_symbol(
+                        item["address"], item["size"], item["kind"], item["name"]
+                    )
                 except (KeyError, TypeError, ValueError):
                     continue
             else:
@@ -216,80 +362,166 @@ class DesktopApp(LiveWatch):
         expanded = []
         formats = {}
         for child in (row, *self.descendants(row)):
-            if child in self.groups:
-                if self.rows.item(child, "open"):
-                    expanded.append(self.paths[child])
-            else:
-                symbol, kind = self.watch[child]
-                if kind != symbol.kind:
-                    formats[self.paths[child]] = kind
+            path = self.paths[child]
+            if child in self.groups and self.rows.item(child, "open"):
+                expanded.append(path)
+            elif child in self.watch:
+                formats[path] = self.watch[child][1]
         return {"expanded": expanded, "formats": formats}
 
-    def save_settings(self):
-        watched = []
+    def watch_settings(self):
+        settings = []
         for row in self.rows.get_children():
-            symbol = self.root_symbol(row)
-            if symbol.is_group:
-                watched.append([symbol.label, self.group_settings(row)])
-            elif symbol.manual:
-                kind = self.watch[row][1]
-                watched.append({"name": symbol.name, "address": symbol.address, "size": symbol.size,
-                                "kind": symbol.kind, "format": kind})
-            else:
-                watched.append([symbol.label, self.watch[row][1]])
-        try:
-            self.profiles.save(self.profile, {
-                "ip": self.ip.get().strip(), "mac": self.mac, "transport": self.transport.get(),
-                "ble_address": self.ble_address, "target": self.target.get(),
-                "elf": self.elf_path or "", "watch": watched, "presets": self.presets,
-            })
-            return True
-        except OSError as error:
-            self.connection_text.set(f"Lỗi lưu profile · {error}")
-            return False
+            if row in self.groups:
+                settings.append([self.paths[row], self.group_settings(row)])
+            elif row in self.watch:
+                symbol, kind = self.watch[row]
+                if symbol.manual:
+                    settings.append(
+                        {
+                            "name": symbol.name,
+                            "address": symbol.address,
+                            "size": symbol.size,
+                            "kind": symbol.kind,
+                            "format": kind,
+                        }
+                    )
+                else:
+                    settings.append([self.paths[row], kind])
+        return settings
 
-    def save_profile_as(self):
-        name = simpledialog.askstring("Profile mới", "Tên profile", parent=self.root)
-        if name is None or not (name := name.strip()):
-            return
-        if name in self.profiles.profiles:
-            messagebox.showerror("Profile đã tồn tại", name, parent=self.root)
-            return
-        previous = self.profile
-        self.profile = name
-        if self.save_settings():
-            self.presets = dict(self.presets)
-            self.profile_box["values"] = list(self.profiles.profiles)
-            self.profile_name.set(name)
-            self.connection_text.set(f"Đã lưu profile {name}.")
+    def save_settings(self):
+        if self.transport.get() == "Wi-Fi":
+            cur = self.ip.get().strip()
+            if cur and "." in cur:
+                self.wifi_ip = cur
         else:
-            self.profile = previous
+            cur = self.ip.get().strip()
+            if cur and (":" in cur or "-" in cur):
+                self.ble_address = cur
+        settings = {
+            "transport": self.transport.get(),
+            "ip": self.wifi_ip or "",
+            "mac": self.mac,
+            "ble_address": self.ble_address or "",
+            "target": self.target.get(),
+            "elf": self.elf_path or "",
+            "watch": self.watch_settings(),
+            "presets": self.presets,
+        }
+        self.profiles.save(self.profile, settings)
 
-    def change_profile(self, _event):
-        name = self.profile_name.get()
-        if name == self.profile:
-            return
-        if not self.save_settings():
+    def change_profile(self, _event=None):
+        if self.activity is not None or self.pending_write is not None:
             self.profile_name.set(self.profile)
             return
-        self.keep_link = False
-        self.close_rtt_window()
-        self.run_task("Đang đổi profile...", self.stop_link, result=lambda _: self.use_profile(name))
-
-    def use_profile(self, name):
-        if self.plot is not None and self.plot.winfo_exists():
-            self.plot.destroy()
-        self.clear_connection()
-        self.profile = name
-        self.load_profile()
-        self.connection_text.set(f"Đã mở profile {name}.")
+        if self.profile_name.get() == self.profile:
+            return
         self.save_settings()
+        self.profile = self.profile_name.get()
+        self.profiles.set_active(self.profile)
+        self.load_profile()
+        self.refresh_buttons()
         self.startup()
+
+    def save_profile_as(self):
+        name = simpledialog.askstring(
+            "Lưu profile mới", "Tên profile mới", parent=self.root
+        )
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        self.save_settings()
+        self.profiles.duplicate(self.profile, name)
+        self.profile = name
+        self.profile_name.set(name)
+        self.profile_box["values"] = list(self.profiles.profiles)
+        self.save_settings()
+
+    def choose_preset(self):
+        if not self.presets or not self.can_use_target():
+            return
+        names = list(self.presets)
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Áp dụng preset tuning")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        box = ttk.Combobox(dialog, values=names, state="readonly", width=32)
+        box.set(names[0])
+        box.pack(padx=12, pady=12)
+
+        def apply_selected():
+            name = box.get()
+            dialog.destroy()
+            self.apply_preset(name)
+
+        ttk.Button(dialog, text="Áp dụng", command=apply_selected).pack(pady=(0, 12))
+
+    def apply_preset(self, name):
+        preset = self.presets.get(name)
+        if not preset or self.activity is not None or not self.can_use_target():
+            return
+        self.activity = "preset"
+        self.connection_text.set(f"Đang áp dụng preset {name}...")
+        self.refresh_buttons()
+        session = self.write_session()
+
+        def write_values():
+            written = 0
+            with OpenOcd(self.port) as ocd:
+                for item in preset:
+                    if not self.same_session(session) or self.closing:
+                        break
+                    symbol = manual_symbol(
+                        item["address"], item["size"], item["kind"], item["name"]
+                    )
+                    ocd.write(symbol, item["raw"])
+                    written += 1
+            return written
+
+        self.executor.submit(write_values).add_done_callback(
+            lambda future: self.root.after_idle(self._apply_preset_done, name, future)
+        )
+
+    def _apply_preset_done(self, name, future):
+        self.activity = None
+        try:
+            count = future.result()
+            self.connection_text.set(f"Đã ghi {count} giá trị cho preset {name}.")
+        except Exception as error:
+            self.connection_text.set(f"Lỗi áp dụng preset · {error}")
+        self.refresh_buttons()
+
+    def save_preset(self):
+        rows = list(self.watch)
+        if not rows:
+            messagebox.showinfo(
+                "Lưu tuning", "Chưa có biến nào để lưu.", parent=self.root
+            )
+            return
+        options = []
+        for row in rows:
+            if row in self.raw_values:
+                symbol, kind = self.watch[row]
+                options.append((self.paths[row], symbol, kind, self.raw_values[row]))
+        if not options:
+            messagebox.showinfo(
+                "Lưu tuning", "Chưa có giá trị nào được đọc từ chip.", parent=self.root
+            )
+            return
+        dialog = PresetDialog(self.root, options)
+        if dialog.result is not None:
+            name, values = dialog.result
+            self.presets[name] = values
+            self.save_settings()
+            self.connection_text.set(f"Đã lưu preset {name}.")
 
     def open_elf(self, path):
         if self.activity is not None or self.closing:
             return
-        manual_watch = [(symbol, kind) for symbol, kind in self.watch.values() if symbol.manual]
+        manual_watch = [
+            (symbol, kind) for symbol, kind in self.watch.values() if symbol.manual
+        ]
         if super().open_elf(path):
             self.elf_path = str(Path(path).resolve())
             self.verified = None
@@ -304,7 +536,9 @@ class DesktopApp(LiveWatch):
         version = self.elf_signature(resolved)
         symbols = super().read_symbols(resolved)
         if self.elf_signature(resolved) != version:
-            raise RuntimeError("ELF vừa thay đổi trong lúc mở. Mở lại file sau khi build xong.")
+            raise RuntimeError(
+                "ELF vừa thay đổi trong lúc mở. Mở lại file sau khi build xong."
+            )
         self.elf_version = version
         return symbols
 
@@ -316,581 +550,577 @@ class DesktopApp(LiveWatch):
     def startup(self):
         if self.closing or self.keep_link or self.activity is not None:
             return
-        if self.transport.get() == "Bluetooth":
-            if self.ble_address:
-                self.begin_connect()
-        elif self.ip.get().strip() or self.mac:
-            self.begin_connect()
-
-
-    def can_use_target(self):
-        return (bool(self.link_status) and self.server.running and self.activity is None and not self.closing
-                and (self.bridge is None or self.bridge.is_running))
-
-    def write_session(self):
-        return self.server.process
-
-    def same_session(self, session):
-        if super().same_session(session):
-            return True
-        self.connection_text.set("Kết nối đã đổi. Kiểm tra probe rồi thực hiện lại thao tác.")
-        return False
+        if self.transport.get() == "Wi-Fi" and self.ip.get().strip():
+            self.toggle_connection()
+        elif self.transport.get() == "Bluetooth" and (
+            self.ble_address or self.ip.get().strip()
+        ):
+            self.toggle_connection()
 
     def refresh_buttons(self):
-        idle = self.activity is None and self.pending_write is None and not self.closing
-        ready = idle and self.can_use_target()
-        editable = idle and not self.keep_link
-        wifi = self.transport.get() == "Wi-Fi"
-        self.ip_entry.configure(state="normal" if editable and wifi else "disabled")
-        for box in (self.transport_box, self.target_box):
-            box.configure(state="readonly" if editable else "disabled")
-        self.profile_box.configure(state="readonly" if idle else "disabled")
-        self.profile_button.configure(state="normal" if idle else "disabled")
-        self.connect_button.configure(text="Ngắt" if self.keep_link else "Kết nối",
-                                      state="normal" if idle else "disabled")
-        for button in (self.usb_button, self.wifi_button, self.find_button, self.mode_button):
-            button.configure(state="normal" if editable else "disabled")
-        for button in (self.usb_button, self.wifi_button):
-            if not wifi:
-                button.configure(state="disabled")
-        self.halt_button.configure(state="normal" if ready and self.core_state != "halted" else "disabled")
-        running = self.core_state in ("running", "debug-running")
-        self.resume_button.configure(state="normal" if ready and not running else "disabled")
-        self.rtt_button.configure(state="normal" if ready else "disabled")
-        for button in (self.program_button, self.verify_button):
-            button.configure(state="normal" if ready and self.elf_path else "disabled")
-        snapshot_ready = ready and any(self.watch[row][0].writable for row in self.raw_values)
-        self.save_preset_button.configure(state="normal" if snapshot_ready else "disabled")
-        self.apply_preset_button.configure(state="normal" if ready and self.presets else "disabled")
-        self.update_selection()
+        transport = self.transport.get()
+        busy = self.activity is not None
+        connected = bool(self.link_status)
+        self.connect_button.configure(
+            text="Ngắt" if connected or busy else "Kết nối",
+            state="normal" if not self.closing else "disabled",
+        )
+        self.find_button.configure(
+            state="normal" if not busy and not self.closing else "disabled"
+        )
+        self.usb_button.configure(
+            state="normal" if not busy and not self.closing else "disabled"
+        )
+        self.wifi_button.configure(
+            state="normal" if not busy and not self.closing else "disabled"
+        )
+        self.mode_button.configure(
+            state="normal" if not busy and not self.closing else "disabled"
+        )
+        self.ip_entry.configure(
+            state="normal" if not busy and not self.closing else "disabled"
+        )
+        can_target = self.can_use_target()
+        self.halt_button.configure(
+            state="normal" if can_target and not busy else "disabled"
+        )
+        self.resume_button.configure(
+            state="normal" if can_target and not busy else "disabled"
+        )
+        self.program_button.configure(
+            state="normal" if can_target and not busy else "disabled"
+        )
+        self.verify_button.configure(
+            state="normal" if can_target and not busy else "disabled"
+        )
+        self.save_preset_button.configure(
+            state="normal" if can_target and not busy else "disabled"
+        )
+        self.apply_preset_button.configure(
+            state="normal" if can_target and not busy else "disabled"
+        )
+        self.rtt_button.configure(
+            state="normal" if can_target and not busy else "disabled"
+        )
 
-    def run_task(self, status, function, *args, result=None, failed=None):
-        if self.activity is None and not self.closing and self.pending_write is None:
-            self.connection_text.set(status)
-            self.activity = (self.executor.submit(function, *args), result, failed)
-            self.refresh_buttons()
+    def show_link(self, state, detail=""):
+        if not self.winfo_exists():
+            return
+        labels = {
+            "idle": "Chưa kết nối",
+            "working": "Đang kết nối...",
+            "ready": "Đã kết nối",
+            "error": "Lỗi kết nối.",
+        }
+        if state == "working":
+            self.link_pulse.pack(side="left", padx=8)
+            self.link_pulse.start(10)
+        else:
+            self.link_pulse.stop()
+            self.link_pulse.pack_forget()
+
+        for idx, (code, label) in enumerate(LINK_STEPS):
+            lbl = self.link_indicators[idx]
+            if state == "ready":
+                lbl.configure(text=f"✓ {label}", foreground="#2E7D32")
+            elif state == "working":
+                if idx < self.link_step:
+                    lbl.configure(text=f"✓ {label}", foreground="#2E7D32")
+                elif idx == self.link_step:
+                    lbl.configure(text=f"● {label}", foreground="#1565C0")
+                else:
+                    lbl.configure(text=f"○ {label}", foreground="#757575")
+            elif state == "error" and idx == self.link_step:
+                lbl.configure(text=f"! {label}", foreground="#C62828")
+            else:
+                lbl.configure(text=f"○ {label}", foreground="#757575")
+
+        if detail:
+            self.link_detail.set(detail)
+
+    def set_core_state(self, state):
+        self.core_state = state
+        self.core_text.set(f"STM32 · {CORE_LABELS.get(state, state)}")
+
+    def probe_alive(self):
+        with OpenOcd(self.port) as ocd:
+            return ocd._call('set _res ""; catch {[target current] curstate} _res; set _res')
+
+    def can_use_target(self):
+        return bool(self.link_status) and self.activity is None
+
+    def write_session(self):
+        return self.link_status
 
     def toggle_connection(self):
-        if self.activity is not None or self.pending_write is not None or self.closing:
-            return
-        if self.keep_link:
-            self.keep_link = False
-            self.health = None
-            self.close_rtt_window()
-            self.run_task("Đang ngắt kết nối...", self.stop_link, result=lambda _: self.clear_connection())
+        if self.link_status or self.activity is not None:
+            self.stop_link()
         else:
             self.begin_connect()
 
     def begin_connect(self):
-        if self.activity is not None or self.pending_write is not None or self.closing:
+        if self.activity is not None or self.closing:
             return
-        transport, ip = self.transport.get(), self.ip.get().strip()
+        transport = self.transport.get()
+        target = self.target.get()
+        ip = self.ip.get().strip()
+
         if transport == "Wi-Fi":
-            if ip != self.last_ip:
-                self.mac = ""
-                self.last_ip = ip
-            if not (ip or self.mac):
-                self.find_probe()
-                return
-            if ip:
-                try:
-                    IPv4Address(ip)
-                except ValueError:
-                    self.connection_text.set("Nhập địa chỉ IPv4 hợp lệ của probe.")
-                    return
-        self.keep_link = True
-        self.link_status = ""
-        self.health = None
-        self.link_events = SimpleQueue()
-        self.set_core_state(None)
-        self.show_link("active", f"Đang chuẩn bị kết nối qua {transport}.", "probe")
-        self.close_rtt_window()
-        self.reset_values()
-        self.run_task("Đang kết nối probe và STM32...", self.start_link,
-                      transport, ip, self.target.get(), self.mac, self.ble_address, self.link_events,
-                      result=self.connected, failed=self.connection_failed)
-
-    def start_link(self, transport, ip, target, mac, ble_address, events):
-        def report(stage, detail):
-            events.put((stage, detail))
-
-        self.stop_link()
-        try:
-            if transport == "Bluetooth":
-                self.bridge = BleBridge(ble_address or None)
-                port = self.bridge.start(progress=report)
-                status = self.server.start("127.0.0.1", target, port, progress=report)
-                return status, ip, mac, self.bridge.probe_address
-            if mac:
-                report("probe", "Đang tìm địa chỉ Wi-Fi của ESP32 đã lưu.")
-                ip = dict(discover_wifi(address=ip)).get(mac, "")
             if not ip:
-                raise RuntimeError("Chưa tìm thấy ESP32 trong mạng Wi-Fi.")
-            report("probe", f"Wi-Fi · ESP32 tại {ip}.")
-            return self.server.start(ip, target, progress=report), ip, mac, ble_address
-        except Exception:
-            self.stop_link()
-            raise
+                messagebox.showerror(
+                    "Thiếu địa chỉ IP",
+                    "Nhập IP của ESP32 hoặc bấm 'Tìm probe'.",
+                    parent=self.root,
+                )
+                return
+            self.activity = "connect"
+            self.link_status = ""
+            self.link_step = 0
+            self.show_link("working", f"Đang kết nối tới probe Wi-Fi {ip}...")
+            self.refresh_buttons()
+            self.executor.submit(self._worker_connect_wifi, ip, target)
+        else:
+            self.activity = "connect"
+            self.link_status = ""
+            self.link_step = 0
+            self.show_link("working", "Đang kết nối qua Bluetooth...")
+            self.refresh_buttons()
+            self.executor.submit(self._worker_connect_ble, target)
+
+    def _worker_connect_wifi(self, ip, target):
+        try:
+            self.link_step = 1
+            self.server.start_wifi(ip, target, self.port)
+            self.link_step = 2
+            self.server.wait_target(self.port)
+            self.link_status = f"wifi://{ip}"
+            self.root.after_idle(self._connect_succeeded)
+        except Exception as error:
+            self.root.after_idle(self._connect_failed, error)
+
+    def _worker_connect_ble(self, target):
+        try:
+            self.link_step = 0
+            if self.bridge is None:
+                addr = self.ble_address or self.ip.get().strip() or None
+                if addr and "." in addr and ":" not in addr:
+                    addr = None
+                self.bridge = BleBridge(address=addr)
+                bridge_port = self.bridge.start()
+            else:
+                bridge_port = self.bridge.port
+            if self.bridge.probe_address:
+                self.ble_address = self.bridge.probe_address
+                self.root.after_idle(lambda: self.ip.set(self.bridge.probe_address))
+            self.link_step = 1
+            self.server.start_ble(bridge_port, target, self.port)
+            self.link_step = 2
+            self.server.wait_target(self.port)
+            self.link_status = "ble://active"
+            self.root.after_idle(self._connect_succeeded)
+        except Exception as error:
+            self.root.after_idle(self._connect_failed, error)
+
+    def _connect_succeeded(self):
+        self.activity = None
+        self.show_link("ready", f"Đã kết nối SWD tới {self.target.get()}.")
+        self.set_core_state("running")
+        self.save_settings()
+        self.refresh_buttons()
+
+    def _connect_failed(self, error):
+        self.activity = None
+        self.server.stop()
+        if self.bridge:
+            self.bridge.stop()
+            self.bridge = None
+        self.show_link("error", str(error))
+        self.set_core_state("unavailable")
+        self.refresh_buttons()
 
     def stop_link(self):
-        self.verified = None
+        self.link_status = ""
+        self.server.stop()
+        if self.bridge:
+            self.bridge.stop()
+            self.bridge = None
         try:
-            if self.rtt is not None:
-                self.rtt.stop()
-        except (OSError, RuntimeError):
+            if self.winfo_exists():
+                self.show_link("idle", "Đã ngắt kết nối.")
+                self.set_core_state("Chưa kết nối")
+                self.refresh_buttons()
+        except Exception:
             pass
-        finally:
-            self.rtt = None
-            try:
-                self.server.stop()
-            finally:
-                if self.bridge is not None:
-                    bridge, self.bridge = self.bridge, None
-                    bridge.stop()
 
-    def connected(self, info):
-        self.link_status, ip, self.mac, self.ble_address = info
-        self.ip.set(ip)
-        self.last_ip = ip
-        self.next_check = monotonic()
-        self.show_link("ready", f"{self.transport.get()} · {self.link_status}")
-        self.connection_text.set("Đã kết nối.")
-        self.save_settings()
-
-    def connection_failed(self, error):
-        self.link_status = ""
-        self.set_core_state(None)
-        self.next_retry = monotonic() + RETRY_INTERVAL
-        hint = " · Sẽ thử nối lại" if self.keep_link else ""
-        self.show_link("error", f"{error}{hint}")
-        self.connection_text.set("Lỗi kết nối.")
-
-    def show_link(self, mode, detail, stage=None):
-        if stage is not None:
-            self.link_step = next(index for index, (key, _) in enumerate(LINK_STEPS) if key == stage)
-        elif mode == "idle":
-            self.link_step = -1
-        for index, ((_, name), indicator) in enumerate(zip(LINK_STEPS, self.link_indicators)):
-            if mode == "ready" or index < self.link_step:
-                prefix, color = "✓", "#15703e"
-            elif index == self.link_step and mode in ("active", "error"):
-                prefix, color = ("●", "#1658a4") if mode == "active" else ("!", "#a12b26")
-            else:
-                prefix, color = "○", "#58636f"
-            indicator.configure(text=f"{prefix} {name}", foreground=color)
-        if mode == "active" and not self.link_pulse.winfo_manager():
-            self.link_pulse.pack(side="left", padx=(0, 10))
-            self.link_pulse.start(18)
-        elif mode != "active" and self.link_pulse.winfo_manager():
-            self.link_pulse.stop()
-            self.link_pulse.pack_forget()
-        self.link_detail.set(detail)
-
-    def update_link_progress(self):
-        while True:
-            try:
-                stage, detail = self.link_events.get_nowait()
-            except Empty:
-                return
-            self.show_link("active", detail, stage)
-
-    def set_core_state(self, state):
-        self.core_state = state
-        label = "Chưa kết nối" if state is None else CORE_LABELS.get(state, CORE_LABELS["unknown"])
-        self.core_text.set(f"STM32 · {label}")
-
-    def reset_values(self):
-        self.pending_read = None
-        self.raw_values.clear()
-        for row in self.watch:
-            self.rows.set(row, "value", "—")
-
-    def clear_connection(self):
-        self.health = None
-        self.link_status = ""
-        self.set_core_state(None)
-        self.show_link("idle", "Đã ngắt kết nối ESP32.")
-        self.reset_values()
-        self.connection_text.set("Đã ngắt kết nối.")
-
-    def probe_alive(self):
-        if not self.server.running:
-            raise RuntimeError("OpenOCD đã dừng.")
-        if self.bridge is not None and not self.bridge.is_running:
-            raise RuntimeError(self.bridge.last_error or "Bluetooth đã ngắt.")
-        return self.ocd_command("read_memory 0xe000ed00 32 1; [target current] curstate", timeout=2)
-
-    def find_probe(self):
-        bluetooth = self.transport.get() == "Bluetooth"
-        find = discover_ble_probes if bluetooth else discover_wifi
-        self.show_link("active", f"Đang tìm ESP32 qua {self.transport.get()}.", "probe")
-        self.run_task("Đang tìm probe...", find, result=lambda found: self.select_probe(found, bluetooth),
-                      failed=self.connection_failed)
-
-    def select_probe(self, found, bluetooth):
-        if not found:
-            self.show_link("error", "Chưa tìm thấy ESP32. Kiểm tra chế độ probe hoặc nhập IP Wi-Fi.", "probe")
-            self.connection_text.set("Chưa tìm thấy ESP32.")
+    def run_control(self, cmd):
+        if not self.can_use_target():
             return
-        if bluetooth:
-            choices = [(f"{item.name} · {item.address}", item.address) for item in found]
-        else:
-            choices = [(f"{ip} · {mac}", (mac, ip)) for mac, ip in found]
-        selected = self.choose_item("Chọn ESP32", [label for label, _ in choices])
-        if selected is None:
-            self.show_link("idle", "Chọn probe để kết nối.")
-            self.connection_text.set("Chưa chọn ESP32.")
-            return
-        probe = dict(choices)[selected]
-        if bluetooth:
-            self.ble_address = probe
-        else:
-            self.mac, ip = probe
-            self.ip.set(ip)
-            self.last_ip = ip
-        self.begin_connect()
 
-    def choose_item(self, title, choices):
-        if len(choices) == 1:
-            return choices[0]
-        options = "\n".join(f"{index}. {label}" for index, label in enumerate(choices, 1))
-        selection = simpledialog.askinteger(title, options, minvalue=1, maxvalue=len(choices), parent=self.root)
-        return choices[selection - 1] if selection is not None else None
+        def worker():
+            with OpenOcd(self.port) as ocd:
+                ocd._call(cmd)
 
-    def use_ip(self, ip):
-        self.transport.set("Wi-Fi")
-        self.mac = ""
-        self.ip.set(ip)
-        self.last_ip = ip
-        self.begin_connect()
-
-    def choose_usb(self):
-        ports = usb_probes()
-        if ports:
-            return self.choose_item("Chọn cổng USB của ESP32", ports)
-        self.connection_text.set("Cắm cáp USB dữ liệu vào ESP32 rồi thử lại.")
-        return None
-
-    def find_usb(self):
-        port = self.choose_usb()
-        if port:
-            self.run_task("Đang tìm IP qua USB...", usb_ip, port, result=self.use_ip)
-
-    def setup_wifi(self):
-        port = self.choose_usb()
-        if not port:
-            return
-        ssid = simpledialog.askstring("Wi-Fi của probe", "Tên Wi-Fi 2,4 GHz", parent=self.root)
-        if ssid is None:
-            return
-        password = simpledialog.askstring("Wi-Fi của probe", "Mật khẩu WPA2", show="*", parent=self.root)
-        if password is not None:
-            self.run_task("Đang cài Wi-Fi và lấy IP...", configure_wifi, port, ssid, password, result=self.use_ip)
-
-    def change_usb_mode(self):
-        port = self.choose_usb()
-        if not port:
-            return
-        mode = self.transport.get()
-        if messagebox.askyesno("Đổi chế độ ESP", f"Đặt ESP32 ở chế độ {mode} và khởi động lại?", parent=self.root):
-            self.run_task("Đang đổi chế độ ESP32...", set_usb_mode, port, "ble" if mode == "Bluetooth" else "wifi",
-                          result=lambda _: self.connection_text.set(f"ESP32 khởi động lại ở chế độ {mode}. Bấm Tìm probe."))
-
-    @staticmethod
-    def ocd_command(command, timeout=3):
-        with OpenOcd(timeout=timeout) as link:
-            return link._call(command)
-
-    def run_control(self, action):
-        self.health = None
-        stopping = action == "halt"
-        command = "halt 2000" if stopping else "resume"
-        label = "Đang dừng STM32..." if stopping else "Đang cho STM32 chạy tiếp..."
-        self.run_task(label, self.ocd_command, f"{command}; [target current] curstate", 5,
-                      result=self.control_done)
-
-    def control_done(self, state):
-        self.set_core_state(state)
-        self.next_check = monotonic() + CHECK_INTERVAL
-        self.connection_text.set(self.core_text.get())
+        self.executor.submit(worker)
 
     def program(self):
-        if not self.elf_path or not self.can_use_target():
+        if not self.can_use_target() or not self.elf_path:
+            messagebox.showinfo(
+                "Nạp ELF", "Chọn file ELF trước khi nạp.", parent=self.root
+            )
             return
-        path = Path(self.elf_path)
-        if not path.is_file():
-            messagebox.showerror("Không tìm thấy ELF", str(path), parent=self.root)
-            return
-        session = self.write_session()
-        confirmed = messagebox.askyesno("Nạp STM32", f"Ghi {path.name} vào flash, kiểm tra rồi reset chạy?", parent=self.root)
-        if confirmed and self.same_session(session):
-            self.verified = None
-            self.close_rtt_window()
-            self.run_task("Đang nạp ELF và verify...", self.server.program, path,
-                          result=lambda _: self.connection_text.set("Đã nạp, verify và reset STM32."))
+        self.activity = "program"
+        self.connection_text.set("Đang nạp firmware...")
+        self.refresh_buttons()
 
-    def verify_current_elf(self, link, force=False):
-        if not self.elf_path:
-            raise RuntimeError("Mở ELF khớp với firmware STM32 đang chạy.")
-        version = self.elf_signature(self.elf_path)
-        if version != self.elf_version:
-            self.verified = None
-            raise RuntimeError("ELF đã thay đổi trên đĩa. Mở lại ELF để cập nhật địa chỉ biến.")
-        if not force and self.verified == version:
-            return None
-        self.verified = None
-        self.verify_progress = (0, 0)
-        count = verify_elf(self.elf_path, link, cancelled=self.verify_cancel.is_set, progress=self.track_progress)
-        if self.elf_signature(self.elf_path) != version:
-            raise RuntimeError("ELF đã thay đổi trong lúc kiểm tra. Mở lại ELF rồi thử lại.")
-        self.verified = version
-        return count
+        def worker():
+            with OpenOcd(self.port) as ocd:
+                ocd._call(f"program {{{self.elf_path}}} verify reset")
 
-    def track_progress(self, done, total):
-        self.verify_progress = done, total
+        self.executor.submit(worker).add_done_callback(
+            lambda future: self.root.after_idle(self._program_done, future)
+        )
+
+    def _program_done(self, future):
+        self.activity = None
+        try:
+            future.result()
+            self.connection_text.set("Nạp firmware thành công.")
+        except Exception as error:
+            self.connection_text.set(f"Lỗi nạp firmware · {error}")
+        self.refresh_buttons()
 
     def check_elf(self):
-        def verify():
-            with OpenOcd(self.port, timeout=8) as link:
-                return self.verify_current_elf(link, force=True)
-
-        self.run_task("Đang so khớp ELF với flash STM32...", verify, result=self.elf_matched)
-
-    def elf_matched(self, count):
-        self.connection_text.set(f"ELF khớp {count:,} byte trong flash STM32.")
-
-    def write(self, symbol, raw):
-        with OpenOcd(self.port, timeout=8) as link:
-            if not symbol.manual:
-                self.verify_current_elf(link)
-            return link.write(symbol, raw)
-
-
-    def save_preset(self):
-        options = []
-        for row in self.descendants("", expanded_only=True):
-            if row in self.raw_values:
-                symbol, kind = self.watch[row]
-                if symbol.writable:
-                    options.append((self.paths[row], symbol, kind, self.raw_values[row]))
-        if not options:
-            self.connection_text.set("Mở nhánh cần lưu và đợi app đọc giá trị.")
+        if not self.can_use_target() or not self.elf_path:
             return
-        dialog = PresetDialog(self.root, options)
-        if dialog.result is None:
-            return
-        name, values = dialog.result
-        if name in self.presets and not messagebox.askyesno(
-            "Lưu tuning", f"Ghi đè preset {name}?", parent=self.root
-        ):
-            return
-        self.presets = {**self.presets, name: values}
-        if self.save_settings():
-            self.connection_text.set(f"Đã lưu {len(values)} giá trị vào preset {name}.")
+        self.activity = "verify"
+        self.connection_text.set("Đang so khớp bộ nhớ...")
+        self.refresh_buttons()
 
-    def choose_preset(self):
-        session = self.write_session()
-        name = self.choose_item("Chọn preset tuning", sorted(self.presets))
-        if name is None:
-            return
+        def worker():
+            with OpenOcd(self.port) as ocd:
+                return ocd._call(f"verify_image {{{self.elf_path}}}")
+
+        self.executor.submit(worker).add_done_callback(
+            lambda future: self.root.after_idle(self._verify_done, future)
+        )
+
+    def _verify_done(self, future):
+        self.activity = None
         try:
-            values = self.preset_values(self.presets[name])
-        except (KeyError, ValueError, TypeError) as error:
-            messagebox.showerror("Preset không hợp lệ", str(error), parent=self.root)
-            return
-        confirmed = messagebox.askyesno("Áp tuning", f"Ghi {len(values)} giá trị RAM từ preset {name}?", parent=self.root)
-        if confirmed and self.same_session(session):
-            self.run_task("Đang áp tuning qua SWD...", self.write_preset, values,
-                          result=lambda count: self.connection_text.set(f"Đã ghi {count} giá trị từ {name}."))
-
-    def preset_values(self, entries):
-        if not isinstance(entries, list) or not entries:
-            raise ValueError("Preset rỗng hoặc sai định dạng.")
-        watched = {(symbol.manual, symbol.label, symbol.address, symbol.size): symbol
-                   for symbol, _ in self.watch.values()}
-        values = []
-        for item in entries:
-            key = (item["manual"], item["name"], item["address"], item["size"])
-            symbol = watched.get(key)
-            if symbol is None or not symbol.writable:
-                raise ValueError(f"Thêm lại {item['name']} với địa chỉ và kích thước gốc vào Watch.")
-            if item.get("kind", symbol.kind) != symbol.kind:
-                raise ValueError(f"Kiểu dữ liệu của {symbol.name} đã thay đổi. Lưu lại preset từ ELF hiện tại.")
-            raw = item["raw"]
-            if type(raw) is not int or not 0 <= raw < (1 << (symbol.size * 8)):
-                raise ValueError(f"Giá trị lưu của {symbol.name} nằm ngoài kích thước kiểu dữ liệu.")
-            values.append((symbol, raw))
-        return values
-
-    def write_preset(self, values):
-        with OpenOcd(self.port, timeout=8) as link:
-            if any(not symbol.manual for symbol, _ in values):
-                self.verify_current_elf(link)
-            for count, (symbol, raw) in enumerate(values):
-                try:
-                    observed = link.write(symbol, raw)
-                except (OSError, RuntimeError, ValueError) as error:
-                    raise RuntimeError(f"Đã xử lý {count}/{len(values)} biến. {symbol.name} · {error}") from error
-                if observed != raw:
-                    raise RuntimeError(f"Đã xác nhận {count}/{len(values)} biến. Đã ghi {symbol.name} 0x{raw:X}, "
-                                       f"đọc lại 0x{observed:X}. Kiểm tra firmware đang cập nhật biến này.")
-        return len(values)
+            res = future.result()
+            self.connection_text.set(f"So khớp ELF: {res}")
+        except Exception as error:
+            self.connection_text.set(f"Lỗi so khớp · {error}")
+        self.refresh_buttons()
 
     def open_plot(self):
-        if self.plot is None or not self.plot.winfo_exists():
-            self.plot = PlotWindow(self.root)
+        if self.plot is not None and self.plot.winfo_exists():
+            self.plot.lift()
+            return
+        self.plot = PlotWindow(self.root)
         self.sync_plot()
-        self.plot.lift()
 
     def sync_plot(self):
         if self.plot is not None and self.plot.winfo_exists():
-            self.plot.sync_series({
-                row: f"{self.paths[row]} (0x{symbol.address:08X})" for row, (symbol, _) in self.watch.items()
-            })
-
-    def on_read(self, values):
-        if self.plot is None or not self.plot.winfo_exists():
-            return
-        self.sync_plot()
-        sample = {}
-        for row, raw in values.items():
-            if row in self.watch:
-                symbol, kind = self.watch[row]
-                sample[row] = numeric_value(raw, symbol.size, kind)
-        if sample:
-            self.plot.add_sample(sample)
+            self.plot.sync_series(
+                {
+                    row: f"{self.paths[row]} (0x{symbol.address:08X})"
+                    for row, (symbol, _) in self.watch.items()
+                }
+            )
 
     def open_rtt(self):
         if self.rtt_window is not None and self.rtt_window.winfo_exists():
             self.rtt_window.lift()
             return
-        default = None
-        if self.elf_path:
-            try:
-                default = rtt_address(self.elf_path)
-            except (OSError, ValueError, RuntimeError) as error:
-                self.connection_text.set(f"Lỗi đọc địa chỉ RTT từ ELF · {error}")
+        if not self.can_use_target():
+            messagebox.showinfo(
+                "Log RTT", "Cần kết nối tới target trước.", parent=self.root
+            )
+            return
         address = simpledialog.askstring(
-            "Log SEGGER RTT", "Địa chỉ control block RTT trong SRAM", parent=self.root,
-            initialvalue=f"0x{default:08X}" if default is not None else "",
+            "Địa chỉ RTT",
+            "Nhập địa chỉ RTT Control Block (hex, e.g. 0x20000000) hoặc để trống để tự tìm:",
+            parent=self.root,
         )
         if address is None:
             return
-        channel = simpledialog.askinteger("Log SEGGER RTT", "Kênh log", parent=self.root, initialvalue=0,
-                                          minvalue=0, maxvalue=31)
-        if channel is None:
+        addr_int = None
+        if address.strip():
+            try:
+                addr_int = int(address.strip(), 16)
+            except ValueError:
+                messagebox.showerror(
+                    "Lỗi địa chỉ", "Địa chỉ hex không hợp lệ.", parent=self.root
+                )
+                return
+        if addr_int is None and self.elf_path:
+            addr_int = rtt_address(self.elf_path)
+        if addr_int is None:
+            messagebox.showwarning(
+                "Tìm RTT",
+                "Không tìm thấy symbol _SEGGER_RTT trong file ELF. Vui lòng nhập địa chỉ cụ thể.",
+                parent=self.root,
+            )
             return
+        self.rtt_window = RttWindow(self.root, self.port, addr_int)
+
+    def find_probe(self):
+        if self.transport.get() == "Bluetooth":
+            self.connection_text.set("Đang quét probe BLE gần đây...")
+
+            def worker():
+                return discover_ble_probes()
+
+            self.executor.submit(worker).add_done_callback(
+                lambda f: self.root.after_idle(self._ble_probes_found, f)
+            )
+        else:
+            self.connection_text.set("Đang quét probe Wi-Fi trong mạng LAN...")
+
+            def worker():
+                return discover_wifi()
+
+            self.executor.submit(worker).add_done_callback(
+                lambda f: self.root.after_idle(self._wifi_probes_found, f)
+            )
+
+    def _ble_probes_found(self, future):
         try:
-            capture = RttCapture(int(address, 0), channel=channel, tcl_port=self.port)
-        except ValueError as error:
-            messagebox.showerror("Địa chỉ RTT không hợp lệ", str(error), parent=self.root)
+            probes = future.result()
+            if not probes:
+                hint = ""
+                probes_usb = usb_probes()
+                if probes_usb:
+                    try:
+                        mode = get_usb_mode(probes_usb[0])
+                        if mode == "wifi":
+                            hint = " (ESP32 đang ở chế độ Wi-Fi. Bấm 'Đổi chế độ ESP' hoặc giữ nút BOOT 1.5s trên chip để sang Bluetooth)."
+                    except Exception:
+                        pass
+                self.connection_text.set(
+                    "Không tìm thấy probe BLE nào gần đây."
+                    + (
+                        hint
+                        or " Hãy đảm bảo ESP32 đang ở chế độ Bluetooth (nháy LED xanh dương)."
+                    )
+                )
+                return
+            self.ble_address = probes[0].address
+            self.ip.set(probes[0].address)
+            self.connection_text.set(
+                f"Đã tìm thấy probe BLE: {probes[0].name or probes[0].address} ({probes[0].address})"
+            )
+        except Exception as error:
+            self.connection_text.set(f"Lỗi quét BLE · {error}")
+
+    def _wifi_probes_found(self, future):
+        try:
+            probes = future.result()
+            if not probes:
+                hint = ""
+                probes_usb = usb_probes()
+                if probes_usb:
+                    try:
+                        mode = get_usb_mode(probes_usb[0])
+                        if mode == "ble":
+                            hint = " (ESP32 đang ở chế độ Bluetooth. Bấm 'Đổi chế độ ESP' hoặc giữ nút BOOT 1.5s trên chip để sang Wi-Fi)."
+                    except Exception:
+                        pass
+                self.connection_text.set(
+                    "Không tìm thấy probe Wi-Fi nào trên LAN."
+                    + (hint or " Hãy kiểm tra router hoặc cấu hình Wi-Fi.")
+                )
+                return
+            ip = probes[0][1]
+            self.wifi_ip = ip
+            self.ip.set(ip)
+            self.connection_text.set(f"Đã tìm thấy probe Wi-Fi: {ip}")
+        except Exception as error:
+            self.connection_text.set(f"Lỗi quét Wi-Fi · {error}")
+
+    def find_usb(self):
+        self.connection_text.set("Đang tìm ESP32 cắm qua USB...")
+
+        def worker():
+            probes = usb_probes()
+            if not probes:
+                raise RuntimeError("Không tìm thấy probe ESP32 cắm qua USB.")
+            port = probes[0]
+            mode = get_usb_mode(port)
+            ip = None
+            if mode == "wifi":
+                try:
+                    ip = usb_ip(port)
+                except Exception:
+                    pass
+            return port, mode, ip
+
+        self.executor.submit(worker).add_done_callback(
+            lambda f: self.root.after_idle(self._usb_info_found, f)
+        )
+
+    def _usb_info_found(self, future):
+        try:
+            port, mode, ip = future.result()
+            mode_str = (
+                "Wi-Fi"
+                if mode == "wifi"
+                else ("Bluetooth (BLE)" if mode == "ble" else str(mode))
+            )
+            if mode == "wifi" and ip:
+                self.wifi_ip = ip
+                if self.transport.get() == "Wi-Fi":
+                    self.ip.set(ip)
+                self.connection_text.set(
+                    f"ESP32 cắm {port}: Chế độ {mode_str}, IP = {ip}"
+                )
+            elif mode == "wifi":
+                self.connection_text.set(
+                    f"ESP32 cắm {port}: Chế độ {mode_str} (chưa có IP, bấm 'Cài Wi-Fi')"
+                )
+            else:
+                self.connection_text.set(f"ESP32 cắm {port}: Chế độ {mode_str}")
+        except Exception as error:
+            self.connection_text.set(f"Lỗi đọc USB · {error}")
+
+    def setup_wifi(self):
+        from tkinter import simpledialog
+
+        ssid = simpledialog.askstring(
+            "Cài đặt Wi-Fi", "Nhập tên mạng (SSID):", parent=self.root
+        )
+        if not ssid:
             return
-        if self.can_use_target():
-            self.run_task("Đang tìm control block RTT...", self.start_rtt, capture, result=self.show_rtt)
-
-    def start_rtt(self, capture):
-        capture.start()
-        self.rtt = capture
-        return capture
-
-    def show_rtt(self, capture):
-        self.rtt_window = RttWindow(self.root, capture, self.stop_rtt_window)
-        self.connection_text.set("Đang đọc log RTT.")
-
-    def close_rtt_window(self):
-        if self.rtt_window is not None and self.rtt_window.winfo_exists():
-            self.rtt_window.stop()
-
-    def stop_rtt_window(self, capture):
-        self.rtt_window = None
-        if not self.closing:
-            self.executor.submit(self.stop_rtt, capture)
-
-    def stop_rtt(self, capture):
-        if self.rtt is capture:
-            try:
-                capture.stop()
-            except (OSError, RuntimeError):
-                pass
-            finally:
-                self.rtt = None
-
-    def poll(self):
-        self.update_link_progress()
-        if self.verify_progress is not None:
-            done, total = self.verify_progress
-            progress = f" · {100 * done // total}%" if total else ""
-            self.connection_text.set(f"Đang so khớp ELF với flash STM32{progress}...")
-        if self.activity is not None and self.activity[0].done():
-            task, callback, failed = self.activity
-            self.activity = None
-            self.verify_progress = None
-            try:
-                value = task.result()
-                if callback and not self.closing:
-                    callback(value)
-            except Exception as error:
-                if failed:
-                    failed(error)
-                else:
-                    self.connection_text.set(f"Lỗi · {error}")
-
-        if self.closing and self.activity is None and self.pending_write is None:
-            try:
-                self.stop_link()
-            finally:
-                super().close()
+        password = simpledialog.askstring(
+            "Cài đặt Wi-Fi", "Nhập mật khẩu Wi-Fi:", parent=self.root, show="*"
+        )
+        if password is None:
             return
 
-        if self.pending_write is not None and self.pending_write[1].done() and self.verify_progress is not None:
-            self.verify_progress = None
-            self.connection_text.set(f"{self.transport.get()} · {self.link_status}")
+        is_ble = self.transport.get() == "Bluetooth"
+        if is_ble:
+            self.connection_text.set("Đang gửi cấu hình Wi-Fi qua Bluetooth...")
 
-        if self.keep_link and not self.closing:
-            self.poll_link()
-        self.sync_plot()
-        super().poll()
-        self.refresh_buttons()
+            def worker():
+                target_addr = self.ble_address or self.ip.get().strip()
+                if not target_addr:
+                    probes = discover_ble_probes(timeout=2.5)
+                    if probes:
+                        target_addr = probes[0].address
+                if not target_addr:
+                    raise RuntimeError(
+                        "Không tìm thấy địa chỉ BLE của probe. Hãy nhấn 'Tìm probe' trước."
+                    )
+                return configure_wifi_ble(target_addr, ssid, password)
+        else:
+            self.connection_text.set("Đang gửi cấu hình Wi-Fi qua USB...")
 
-    def poll_link(self):
-        now = monotonic()
-        if self.activity is not None or self.pending_write is not None:
-            return
-        if self.health is not None and self.health.done():
-            try:
-                self.set_core_state(self.health.result())
-            except (OSError, ValueError, RuntimeError) as error:
-                self.connection_failed(error)
-                self.close_rtt_window()
-                self.reset_values()
-            self.health = None
-        if not self.link_status:
-            if now >= self.next_retry:
-                self.begin_connect()
-        elif self.health is None and now >= self.next_check:
-            self.health = self.executor.submit(self.probe_alive)
-            self.next_check = now + CHECK_INTERVAL
+            def worker():
+                probes = usb_probes()
+                if not probes:
+                    raise RuntimeError("Không tìm thấy probe ESP32 cắm qua USB.")
+                return configure_wifi(probes[0], ssid, password)
+
+        self.executor.submit(worker).add_done_callback(
+            lambda f: self.root.after_idle(self._wifi_configured, f)
+        )
+
+    def _wifi_configured(self, future):
+        try:
+            res = future.result()
+            msg = (
+                f"Đã lưu cấu hình Wi-Fi ({res})"
+                if res
+                else "Đã lưu cấu hình Wi-Fi vào ESP32."
+            )
+            self.connection_text.set(msg)
+        except Exception as error:
+            self.connection_text.set(f"Lỗi cấu hình Wi-Fi · {error}")
+
+    def change_usb_mode(self):
+        modes = ["Wi-Fi", "Bluetooth"]
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Chọn chế độ ESP32")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        box = ttk.Combobox(dialog, values=modes, state="readonly", width=16)
+        curr = "Bluetooth" if self.transport.get() == "Bluetooth" else "Wi-Fi"
+        box.set(curr)
+        box.pack(padx=16, pady=12)
+
+        def apply():
+            target_mode = "wifi" if box.get() == "Wi-Fi" else "ble"
+            chosen_label = box.get()
+            dialog.destroy()
+            self.connection_text.set(f"Đang đổi chế độ ESP32 sang {chosen_label}...")
+
+            def worker():
+                probes = usb_probes()
+                if not probes:
+                    raise RuntimeError("Không tìm thấy probe ESP32 cắm qua USB.")
+                set_usb_mode(probes[0], target_mode)
+                return chosen_label
+
+            self.executor.submit(worker).add_done_callback(
+                lambda f: self.root.after_idle(self._mode_changed, f)
+            )
+
+        ttk.Button(dialog, text="Đổi chế độ", command=apply).pack(pady=(0, 12))
+
+    def _mode_changed(self, future):
+        try:
+            chosen = future.result()
+            self.transport.set(chosen)
+            self._on_transport_changed()
+            self.connection_text.set(
+                f"Đã đổi chế độ ESP32 sang {chosen}. Đang khởi động lại..."
+            )
+        except Exception as error:
+            self.connection_text.set(f"Lỗi đổi chế độ · {error}")
+
+    def _on_window_configure(self, event):
+        if event.widget == self.root:
+            w = event.width
+            wrap = max(300, w - 60)
+            if hasattr(self, "link_detail_label"):
+                self.link_detail_label.configure(wraplength=wrap)
+            if hasattr(self, "status_label"):
+                self.status_label.configure(wraplength=wrap)
+            if hasattr(self, "connection_label"):
+                self.connection_label.configure(wraplength=max(200, w - 380))
 
     def close(self):
         if not self.closing:
             self.save_settings()
             self.closing = True
             self.verify_cancel.set()
-            self.connection_text.set("Đang hoàn tất thao tác trước khi đóng...")
-            self.refresh_buttons()
+            try:
+                atexit.unregister(self.stop_link)
+            except Exception:
+                pass
+            self.stop_link()
+            super().close()
 
 
 def main():
-    folder = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "STM32 Wireless Debug"
+    if "LOCALAPPDATA" in os.environ:
+        folder = Path(os.environ["LOCALAPPDATA"]) / "STM32 Wireless Debug"
+    elif (Path.home() / "STM32 Wireless Debug").is_dir():
+        folder = Path.home() / "STM32 Wireless Debug"
+    else:
+        folder = (
+            Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+            / "STM32 Wireless Debug"
+        )
     folder.mkdir(parents=True, exist_ok=True)
     root = tk.Tk()
     root.title("STM32 Wireless Debug 1.3")
-    root.geometry("985x560")
-    root.minsize(830, 400)
+    root.geometry("1060x660")
+    root.minsize(860, 480)
     DesktopApp(root, folder)
     root.mainloop()
 
 
 if __name__ == "__main__":
     main()
-

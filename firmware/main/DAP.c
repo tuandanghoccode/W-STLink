@@ -28,6 +28,7 @@
 #include <string.h>
 #include "DAP_config.h"
 #include "DAP.h"
+#include "board_mode_ui.h"
 
 
 #if (DAP_PACKET_SIZE < 64U)
@@ -1704,6 +1705,7 @@ __WEAK uint32_t DAP_ProcessVendorCommand(const uint8_t *request, uint8_t *respon
 //   return:   number of bytes in response (lower 16 bits)
 //             number of bytes in request (upper 16 bits)
 uint32_t DAP_ProcessCommand(const uint8_t *request, uint8_t *response) {
+  board_mode_ui_activity();
   uint32_t num;
 
   if ((*request >= ID_DAP_Vendor0) && (*request <= ID_DAP_Vendor31)) {

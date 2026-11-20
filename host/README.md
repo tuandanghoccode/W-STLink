@@ -23,11 +23,13 @@ Mở [STM32 Wireless Debug 1.3.exe](<../dist/STM32 Wireless Debug 1.3.exe>) trê
 | RTT | **Log RTT** đọc log của chương trình STM32 đã tích hợp và khởi tạo SEGGER RTT. App lấy địa chỉ `_SEGGER_RTT` từ ELF khi có. Có thể nhập địa chỉ thủ công và chọn kênh, thường là kênh 0. [Tài liệu OpenOCD RTT](https://openocd.org/doc/html/General-Commands.html#Real-Time-Transfer-_0028RTT_0029) |
 | Nạp và điều khiển | **Nạp ELF** ghi flash, verify và reset chạy sau khi xác nhận. **Dừng chip** halt CPU qua SWD và giữ kết nối để Watch hoặc ghi biến. **Chạy tiếp** resume từ vị trí đang dừng. |
 
-Watch, ghi RAM và đối chiếu flash của firmware đang chạy đều có thể dùng ngay sau khi attach. Giá trị ghi vào RAM có thể bị firmware cập nhật lại hoặc mất khi reset. Profile và preset nằm trong `%LOCALAPPDATA%\STM32 Wireless Debug\settings.json`.
+Watch, ghi RAM và đối chiếu flash của firmware đang chạy đều có thể dùng ngay sau khi attach. Giá trị ghi vào RAM có thể bị firmware cập nhật lại hoặc mất khi reset. Profile và preset nằm trong `%LOCALAPPDATA%\STM32 Wireless Debug\settings.json` (trên Windows) hoặc `~/.config/STM32 Wireless Debug/settings.json` (trên Linux).
 
 ## Chạy từ mã nguồn
 
-Để build app portable, chạy `host/build-windows.ps1` với Python 64-bit. [Thông tin phần mềm kèm theo](third-party.md)
+Để build app portable:
+- Trên Linux (Ubuntu x64): chạy `bash host/build-linux.sh`
+- Trên Windows (x64): chạy `host/build-windows.ps1` trong PowerShell với Python 64-bit. [Thông tin phần mềm kèm theo](third-party.md)
 
 Để chạy riêng Watch, khởi động OpenOCD có hỗ trợ CMSIS-DAP TCP rồi gọi `python host/live_watch.py` trong một PowerShell khác. Cài thư viện Python từ `host/requirements.txt`. Ví dụ dùng STM32F4, thay IP dưới đây bằng IP của probe.
 

@@ -188,56 +188,133 @@ esp_err_t wifi_clear_operating_mode(void)
     return (err == ESP_ERR_NVS_NOT_FOUND) ? ESP_OK : err;
 }
 
-esp_err_t wifi_save_config(const char *ssid, const char *password,
-        wifi_auth_mode_t auth_mode)
+int wifi_get_saved_aps(wifi_saved_ap_t *list, int max_count)
 {
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs_handle);
-    if (err != ESP_OK) {
-        return err;
+    nvs_handle_t handle;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return 0;
+    }
+    uint8_t count = 0;
+    esp_err_t err = nvs_get_u8(handle, "ap_count", &count);
+    if (err != ESP_OK || count == 0) {
+        size_t s_len = sizeof(list[0].ssid);
+        size_t p_len = sizeof(list[0].password);
+        uint8_t am = WIFI_AUTH_WPA2_PSK;
+        if (nvs_get_str(handle, NVS_KEY_SSID, list[0].ssid, &s_len) == ESP_OK &&
+            list[0].ssid[0] != '\0') {
+            nvs_get_str(handle, NVS_KEY_PASSWORD, list[0].password, &p_len);
+            nvs_get_u8(handle, NVS_KEY_AUTH_MODE, &am);
+            list[0].auth_mode = am;
+            nvs_close(handle);
+            return 1;
+        }
+        nvs_close(handle);
+        return 0;
     }
 
-    err = nvs_set_str(nvs_handle, NVS_KEY_SSID, ssid);
-    if (err == ESP_OK) {
-        err = nvs_set_str(nvs_handle, NVS_KEY_PASSWORD, password);
-    }
-    if (err == ESP_OK) {
-        err = nvs_set_u8(nvs_handle, NVS_KEY_AUTH_MODE, (uint8_t)auth_mode);
-    }
-    if (err == ESP_OK) {
-        err = nvs_commit(nvs_handle);
-    }
+    if (count > max_count) count = max_count;
+    if (count > WIFI_MAX_SAVED_APS) count = WIFI_MAX_SAVED_APS;
 
-    nvs_close(nvs_handle);
-    return err;
+    int loaded = 0;
+    for (int i = 0; i < count; i++) {
+        char key_s[16], key_p[16], key_a[16];
+        snprintf(key_s, sizeof(key_s), "ap_s%d", i);
+        snprintf(key_p, sizeof(key_p), "ap_p%d", i);
+        snprintf(key_a, sizeof(key_a), "ap_a%d", i);
+        size_t s_len = sizeof(list[loaded].ssid);
+        size_t p_len = sizeof(list[loaded].password);
+        uint8_t am = WIFI_AUTH_WPA2_PSK;
+        if (nvs_get_str(handle, key_s, list[loaded].ssid, &s_len) == ESP_OK && list[loaded].ssid[0] != '\0') {
+            nvs_get_str(handle, key_p, list[loaded].password, &p_len);
+            nvs_get_u8(handle, key_a, &am);
+            list[loaded].auth_mode = am;
+            loaded++;
+        }
+    }
+    nvs_close(handle);
+    return loaded;
 }
 
-static esp_err_t load_wifi_credentials(void)
+esp_err_t wifi_add_or_promote_ap(const char *ssid, const char *password, wifi_auth_mode_t auth_mode)
 {
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &nvs_handle);
-    if (err != ESP_OK) {
-        return err;
+    if (!ssid || strlen(ssid) == 0 || strlen(ssid) > 32) {
+        return ESP_ERR_INVALID_ARG;
     }
+    wifi_saved_ap_t list[WIFI_MAX_SAVED_APS];
+    memset(list, 0, sizeof(list));
+    int count = wifi_get_saved_aps(list, WIFI_MAX_SAVED_APS);
 
-    size_t ssid_len = MAX_SSID_LEN;
-    size_t password_len = MAX_PASSWORD_LEN;
-    uint8_t auth_mode;
-
-    err = nvs_get_str(nvs_handle, NVS_KEY_SSID, stored_ssid, &ssid_len);
-    if (err == ESP_OK) {
-        err = nvs_get_str(nvs_handle, NVS_KEY_PASSWORD, stored_password,
-                &password_len);
-    }
-    if (err == ESP_OK) {
-        err = nvs_get_u8(nvs_handle, NVS_KEY_AUTH_MODE, &auth_mode);
-        if (err == ESP_OK) {
-            stored_auth_mode = (wifi_auth_mode_t)auth_mode;
+    int found_idx = -1;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(list[i].ssid, ssid) == 0) {
+            found_idx = i;
+            break;
         }
     }
 
-    nvs_close(nvs_handle);
+    wifi_saved_ap_t target;
+    memset(&target, 0, sizeof(target));
+    strlcpy(target.ssid, ssid, sizeof(target.ssid));
+    if (password) {
+        strlcpy(target.password, password, sizeof(target.password));
+    }
+    target.auth_mode = (uint8_t)auth_mode;
+
+    if (found_idx >= 0) {
+        for (int i = found_idx; i > 0; i--) {
+            list[i] = list[i - 1];
+        }
+        list[0] = target;
+    } else {
+        int new_count = (count < WIFI_MAX_SAVED_APS) ? (count + 1) : WIFI_MAX_SAVED_APS;
+        for (int i = new_count - 1; i > 0; i--) {
+            list[i] = list[i - 1];
+        }
+        list[0] = target;
+        count = new_count;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) return err;
+
+    nvs_set_u8(handle, "ap_count", (uint8_t)count);
+    for (int i = 0; i < count; i++) {
+        char key_s[16], key_p[16], key_a[16];
+        snprintf(key_s, sizeof(key_s), "ap_s%d", i);
+        snprintf(key_p, sizeof(key_p), "ap_p%d", i);
+        snprintf(key_a, sizeof(key_a), "ap_a%d", i);
+        nvs_set_str(handle, key_s, list[i].ssid);
+        nvs_set_str(handle, key_p, list[i].password);
+        nvs_set_u8(handle, key_a, list[i].auth_mode);
+    }
+    nvs_set_str(handle, NVS_KEY_SSID, list[0].ssid);
+    nvs_set_str(handle, NVS_KEY_PASSWORD, list[0].password);
+    nvs_set_u8(handle, NVS_KEY_AUTH_MODE, list[0].auth_mode);
+
+    err = nvs_commit(handle);
+    nvs_close(handle);
+
+    printf("[WIFI] Saved AP '%s' to slot 0 (total %d saved APs)\n", list[0].ssid, count);
     return err;
+}
+
+esp_err_t wifi_save_config(const char *ssid, const char *password,
+        wifi_auth_mode_t auth_mode)
+{
+    return wifi_add_or_promote_ap(ssid, password, auth_mode);
+}
+
+__attribute__((unused)) static esp_err_t load_wifi_credentials(void)
+{
+    wifi_saved_ap_t list[1];
+    if (wifi_get_saved_aps(list, 1) > 0 && list[0].ssid[0] != '\0') {
+        strlcpy(stored_ssid, list[0].ssid, sizeof(stored_ssid));
+        strlcpy(stored_password, list[0].password, sizeof(stored_password));
+        stored_auth_mode = (wifi_auth_mode_t)list[0].auth_mode;
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_FOUND;
 }
 
 esp_err_t wifi_clear_config(void)
@@ -392,8 +469,7 @@ static void event_handler(void* arg, esp_event_base_t event_base,
 {
     if (event_base == WIFI_EVENT) {
         if (event_id == WIFI_EVENT_STA_START) {
-            printf("Attempting to connect to WiFi SSID: '%s'\n", wifi_ssid);
-            esp_wifi_connect();
+            printf("WiFi station interface started.\n");
         }
         else if (event_id == WIFI_EVENT_STA_CONNECTED) {
             int rssi = 0;
@@ -502,23 +578,25 @@ esp_err_t wifi_init(void)
     if (operating_mode == WIFI_OPERATING_MODE_AP)
         return wifi_init_softap();
 
-    if (load_wifi_credentials() == ESP_OK && stored_ssid[0] != '\0') {
-        wifi_ssid = stored_ssid;
-        wifi_password = stored_password;
-        wifi_auth_mode = stored_auth_mode;
-        printf("Using WiFi credentials from flash.\n");
-    } else if (wifi_ssid[0] == '\0') {
-        printf("WiFi is unconfigured. Use the USB console: "
-               "wifi \"SSID\" \"PASSWORD\" wpa2, then reboot.\n");
-        return ESP_ERR_NOT_FOUND;
-    } else {
-        printf("Using WiFi credentials from hardcoded CONFIG.\n");
+    wifi_saved_ap_t saved_aps[WIFI_MAX_SAVED_APS];
+    int ap_count = wifi_get_saved_aps(saved_aps, WIFI_MAX_SAVED_APS);
+
+    if (ap_count == 0) {
+        if (CONFIG_ESP_WIFI_SSID[0] != '\0') {
+            strlcpy(saved_aps[0].ssid, CONFIG_ESP_WIFI_SSID, sizeof(saved_aps[0].ssid));
+            strlcpy(saved_aps[0].password, CONFIG_ESP_WIFI_PASSWORD, sizeof(saved_aps[0].password));
+            saved_aps[0].auth_mode = ESP_WIFI_SCAN_AUTH_MODE_THRESHOLD;
+            ap_count = 1;
+            printf("Using WiFi credentials from hardcoded CONFIG.\n");
+        } else {
+            printf("WiFi is unconfigured. Use the USB console or BLE to set WiFi credentials.\n");
+            return ESP_ERR_NOT_FOUND;
+        }
     }
 
     wifi_event_group = xEventGroupCreate();
 
     ESP_ERROR_CHECK(esp_netif_init());
-
     ESP_ERROR_CHECK(esp_event_loop_create_default());
     sta_netif = esp_netif_create_default_wifi_sta();
 
@@ -528,72 +606,79 @@ esp_err_t wifi_init(void)
     esp_event_handler_instance_t instance_any_id;
     esp_event_handler_instance_t instance_got_ip;
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
-                WIFI_EVENT,
-                ESP_EVENT_ANY_ID,
-                &event_handler,
-                NULL,
-                &instance_any_id));
+                WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, &instance_any_id));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
-                IP_EVENT,
-                IP_EVENT_STA_GOT_IP,
-                &event_handler,
-                NULL,
-                &instance_got_ip));
+                IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip));
 #ifdef CONFIG_LWIP_IPV6
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
-                IP_EVENT,
-                IP_EVENT_GOT_IP6,
-                &event_handler,
-                NULL,
-                &instance_got_ip));
+                IP_EVENT, IP_EVENT_GOT_IP6, &event_handler, NULL, &instance_got_ip));
 #endif
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .threshold.authmode = wifi_auth_mode,
-            .sae_pwe_h2e = ESP_WIFI_SAE_MODE,
-            .sae_h2e_identifier = EXAMPLE_H2E_IDENTIFIER,
-        },
-    };
-
-    // Copy SSID and password (need to handle const char* to uint8_t[]
-    // conversion).
-    strlcpy((char*)wifi_config.sta.ssid, wifi_ssid,
-            sizeof(wifi_config.sta.ssid));
-    strlcpy((char*)wifi_config.sta.password, wifi_password,
-            sizeof(wifi_config.sta.password));
-    if(wifi_auth_mode == WIFI_AUTH_OPEN) {
-        wifi_config.sta.pmf_cfg.capable = true;
-        wifi_config.sta.pmf_cfg.required = false;
-    }
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
+    // Limit TX power to +14dBm to keep LDO cool on compact SuperMini
+    esp_wifi_set_max_tx_power(56);
+    esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
 
-    /* Wait until either the connection is established (WIFI_CONNECTED_BIT)
-     * or connection failed for the maximum number of re-tries (WIFI_FAIL_BIT).
-     * The bits are set by event_handler() above.
-     */
-    EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
-            WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-            pdFALSE,
-            pdFALSE,
-            portMAX_DELAY);
+    for (int cycle = 0; cycle < 5; cycle++) {
+        for (int i = 0; i < ap_count; i++) {
+            wifi_ssid = saved_aps[i].ssid;
+            wifi_password = saved_aps[i].password;
+            wifi_auth_mode = (wifi_auth_mode_t)saved_aps[i].auth_mode;
 
-    if (bits & WIFI_CONNECTED_BIT) {
+            printf("[WIFI] Trying saved AP [%d/%d]: '%s'...\n", i + 1, ap_count, wifi_ssid);
+
+            wifi_config_t wifi_config = {
+                .sta = {
+                    .threshold.authmode = wifi_auth_mode,
+                    .sae_pwe_h2e = ESP_WIFI_SAE_MODE,
+                    .sae_h2e_identifier = EXAMPLE_H2E_IDENTIFIER,
+                },
+            };
+            strlcpy((char*)wifi_config.sta.ssid, wifi_ssid, sizeof(wifi_config.sta.ssid));
+            strlcpy((char*)wifi_config.sta.password, wifi_password, sizeof(wifi_config.sta.password));
+            if (wifi_auth_mode == WIFI_AUTH_OPEN) {
+                wifi_config.sta.pmf_cfg.capable = true;
+                wifi_config.sta.pmf_cfg.required = false;
+            }
+
+            esp_wifi_disconnect();
+            vTaskDelay(pdMS_TO_TICKS(60));
+            esp_err_t set_err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+            if (set_err != ESP_OK) {
+                vTaskDelay(pdMS_TO_TICKS(100));
+                esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+            }
+            xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+            wifi_retry_num = 0;
+            esp_wifi_connect();
+
+            EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
+                    WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                    pdFALSE, pdFALSE, pdMS_TO_TICKS(6000));
+
+            if (bits & WIFI_CONNECTED_BIT) {
+                printf("[WIFI] Successfully connected to '%s'!\n", wifi_ssid);
+                if (i > 0) {
+                    wifi_add_or_promote_ap(saved_aps[i].ssid, saved_aps[i].password, wifi_auth_mode);
+                }
 #ifdef CONFIG_ESP_DAP_DISABLE_WIFI_POWER_SAVE
-        // Disable power-save to improve WiFi performance.
-        // https://github.com/espressif/arduino-esp32/issues/1484
-        printf("Disabling WiFi power savings to improve performance.\n");
-        esp_wifi_set_ps(WIFI_PS_NONE);
+                printf("Disabling WiFi power savings to improve performance.\n");
+                esp_wifi_set_ps(WIFI_PS_NONE);
 #endif
 #ifdef CONFIG_LWIP_IPV6
-        // Trigger IPv6 SLAAC auto-configuration, after IPv4 is up.
-        esp_err_t err = esp_netif_create_ip6_linklocal(sta_netif);
-        if (err != ESP_OK)
-            perror("Failed to create IPv6 link local address");
+                esp_err_t err = esp_netif_create_ip6_linklocal(sta_netif);
+                if (err != ESP_OK)
+                    perror("Failed to create IPv6 link local address");
 #endif
-        return 0;   // Success.
+                return 0;
+            } else {
+                printf("[WIFI] Failed to connect to '%s'. Trying next...\n", wifi_ssid);
+                esp_wifi_disconnect();
+                vTaskDelay(pdMS_TO_TICKS(300));
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
-    return -1;      // Failure.
+    return -1;
 }

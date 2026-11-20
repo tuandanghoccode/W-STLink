@@ -55,6 +55,7 @@
 #include "DAP.h"
 #include "cmsis_dap_tcp.h"
 #include "probe_link.h"
+#include "board_mode_ui.h"
 #ifdef CONFIG_BT_NIMBLE_ENABLED
 #include "cmsis_dap_ble.h"
 #endif
@@ -596,6 +597,8 @@ void app_main(void)
     commands_init_serial();
 #endif
 
+    board_mode_ui_init();
+
 #ifdef CONFIG_BT_NIMBLE_ENABLED
     if (probe_link_use_ble()) {
         cmsis_dap_task_start(true);
@@ -611,14 +614,9 @@ void app_main(void)
     if (ret == ESP_ERR_NOT_FOUND)
         return;
     if (ret != ESP_OK) {
-        if (wifi_get_operating_mode() == WIFI_OPERATING_MODE_AP) {
-            fprintf(stderr, "SoftAP failed to start; network services "
-                    "disabled. Fix the settings from the serial console "
-                    "and reboot.\n");
-            return;
-        }
-        fprintf(stderr, "Restarting due to WiFi connection failures.\n");
-        reboot();
+        fprintf(stderr, "[WIFI] Could not connect to any saved AP. Probe stays alive in idle.\n");
+        fprintf(stderr, "[WIFI] Press BOOT button to switch to Bluetooth, or configure Wi-Fi via USB.\n");
+        return;
     }
     if (wifi_get_operating_mode() == WIFI_OPERATING_MODE_STA)
         probe_link_start_discovery(mac_addr_str);
